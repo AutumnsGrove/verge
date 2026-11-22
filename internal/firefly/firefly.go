@@ -172,7 +172,7 @@ func (f *Firefly) Acquire(ctx context.Context, machine MachineID, holder string,
 			return fmt.Errorf("%w: %s", ErrUnknownMachine, machine)
 		}
 		doc.NextLeaseNumber++
-		id = LeaseID("lease-" + strconv.FormatUint(doc.NextLeaseNumber, 10))
+		id = LeaseID(leasePrefix + strconv.FormatUint(doc.NextLeaseNumber, 10))
 		doc.Leases = append(doc.Leases, Lease{
 			ID:      id,
 			Machine: machine,
@@ -240,6 +240,11 @@ func (f *Firefly) Release(ctx context.Context, id LeaseID) error {
 	})
 }
 
+// leasePrefix is the one place the id format appears. Acquire mints with it and
+// leaseNumber reads with it, so the two cannot drift into a state where every
+// pruned renewal silently reports "no such lease" instead of "expired".
+const leasePrefix = "lease-"
+
 // leaseNumber reads the counter out of an id this package minted.
 //
 // The format is internal: a caller treats the id as opaque, which is why this is
@@ -248,11 +253,10 @@ func (f *Firefly) Release(ctx context.Context, id LeaseID) error {
 // into an error that callers are told to treat as a bug.
 func leaseNumber(id LeaseID) (uint64, bool) {
 	s := string(id)
-	const prefix = "lease-"
-	if !strings.HasPrefix(s, prefix) {
+	if !strings.HasPrefix(s, leasePrefix) {
 		return 0, false
 	}
-	n, err := strconv.ParseUint(s[len(prefix):], 10, 64)
+	n, err := strconv.ParseUint(s[len(leasePrefix):], 10, 64)
 	if err != nil {
 		return 0, false
 	}
