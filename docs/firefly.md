@@ -8,8 +8,9 @@ machines that currently exist, what must change?* Everything else in this reposi
 it through three narrow interfaces, and it is handed the current time rather than looking it up.
 
 The transition table, the lease arithmetic, the durable document with its in-memory store, and both
-boundary interfaces are implemented in `internal/firefly`, with a fake provider and a fake network
-sharing one clock. The reconcile loop and the real Hetzner and tailnet clients are not.
+boundary interfaces and the lease registry are implemented in `internal/firefly`, with a fake
+provider and a fake network sharing one clock. The reconcile loop (`Tick`) and the real Hetzner and
+tailnet clients are not.
 `docs/testing.md` names the files the remainder will become, and every new behaviour still starts as
 a failing test.
 
@@ -86,13 +87,21 @@ type Firefly interface {
     Tick(ctx context.Context, now time.Time) (Result, error)
 
     // Leases. Acquire and Renew are the only ways to make a machine stay.
-    Acquire(holder string, kind Kind, ttl time.Duration, now time.Time) (LeaseID, error)
+    //
+    // Acquire names the machine, which the first version of this document forgot:
+    // a lease that cannot say which machine it holds open cannot be counted
+    // against one. Placement still belongs to the caller — it has already chosen
+    // the machine by the time it asks.
+    Acquire(machine MachineID, holder string, kind Kind, ttl time.Duration, now time.Time) (LeaseID, error)
     Renew(id LeaseID, ttl time.Duration, now time.Time) error
     Release(id LeaseID) error
 
-    // Snapshot is read-only and safe to call from anywhere, but it reports
-    // live counts, so it needs the clock like everything else.
-    Snapshot(now time.Time) Snapshot
+    // Snapshot is read-only and safe to call from anywhere, but it reports live
+    // counts, so it needs the clock like everything else -- and it can fail,
+    // because it may be the first call that has to read the document. A snapshot
+    // that silently returns nothing because storage is unreachable is worse than
+    // one that says so.
+    Snapshot(ctx context.Context, now time.Time) (Snapshot, error)
 
     // Destroy is the operator's override, not part of the normal path.
     Destroy(ctx context.Context, machine MachineID, reason string) error
@@ -565,8 +574,11 @@ may.
 
 Named so that review can point at them and say "not here":
 
-- **Placement.** Firefly reports capacity (`Snapshot(now).Machines[i].Live`, `.Capacity`) and the
-  caller picks a machine. The policy of packing sessions onto one box is not a lifecycle question.
+- **Placement.** Firefly reports live counts and each machine's deadline —
+  `Snapshot(ctx, now).Machines[i]` gives `Live`, `State`, `Since`, and `Deadline` — and the caller
+  picks a machine. Capacity is absent on purpose: how many sessions a machine *should* hold is
+  policy, and the table above says so, so the caller compares `Live` against its own limit. The
+  policy of packing sessions onto one box is not a lifecycle question.
 - **The proxy and its ledger.** Per-session tokens, spend caps, and provider keys. Firefly never
   learns that a model exists.
 - **Repository cloning and the agent process.** Everything that happens inside `READY`.
@@ -586,7 +598,7 @@ Not decided here, recorded so the next document does not invent an answer by acc
    noticed on a bill. Guess: fifteen minutes. Measure before fixing.
 3. **Whether `Turn` leases are worth their own kind.** They may collapse into `Session` renewed by
    stream activity, and the kind list is one shorter. The reason to keep them is that
-   `Snapshot(now)` can then report "a machine with sessions but no turns" — idle, but resumable —
+   `Snapshot(ctx, now)` can then report "a machine with sessions but no turns" — idle, but resumable —
    which is exactly what the UI wants to show.
 4. **Adoption after a split brain.** Two orchestrators disagreeing about one machine resolves by
    the cloud's label and the earlier `MaxLifetime` deadline, but the tie-break deserves a `bad/`

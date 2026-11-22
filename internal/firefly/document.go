@@ -54,7 +54,14 @@ type Machine struct {
 // at a specific instant. Revisit when there is a test with two machines and
 // something worth losing; until then the simpler shape is the honest one.
 type Document struct {
-	Version  int
+	Version int
+
+	// NextLeaseNumber is the counter lease ids are minted from. It lives in the
+	// document rather than in memory so that a restart continues the sequence
+	// instead of reissuing an id a caller still holds -- and so that the ids are
+	// stable enough to appear in a test without a random source.
+	NextLeaseNumber uint64
+
 	Machines []Machine
 	Leases   []Lease
 }
@@ -188,7 +195,7 @@ func (d Document) Validate() error {
 // of a tick. Without this, one goroutine's append is another's corrupt state,
 // and the race detector finds it only if a test happens to interleave.
 func (d Document) Clone() Document {
-	out := Document{Version: d.Version}
+	out := Document{Version: d.Version, NextLeaseNumber: d.NextLeaseNumber}
 	if d.Machines != nil {
 		out.Machines = make([]Machine, len(d.Machines))
 		copy(out.Machines, d.Machines)

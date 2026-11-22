@@ -28,7 +28,8 @@ internal/
     document_test.go
     store.go                  the Store interface and an in-memory implementation
     store_test.go             round-trip, rejected writes, copy isolation, race
-    firefly_test.go           integration: the real loop, fake cloud, fake clock
+    firefly.go                the mechanism: config, leases, snapshot
+    firefly_test.go           the registry, id continuity, failed saves
     order_test.go             the sync-before-delete invariant
     testdata/golden/          recorded event logs, replayed by the fake
   cloud/hetzner/
