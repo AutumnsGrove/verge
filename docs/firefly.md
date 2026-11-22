@@ -430,14 +430,18 @@ distinguishable, so it is labelled:
 
 | Series | Incremented by | Correct steady state |
 |---|---|---|
-| `abandonments_total{reason="sync_failed"}` | case (1), the cap | **zero**, always, in every environment |
+| `abandonments_total{reason="sync_failed"}` | case (1), the cap | zero; nonzero only in a run that injects the permanent sync failure, where the `sad/` case asserts exactly one |
 | `abandonments_total{reason="operator"}` | case (2), `Destroy` | zero in production; nonzero wherever the E2E sweeper runs, by design |
 
-The alarm is therefore on the series, not the total. An earlier draft of this paragraph said a
-nonzero counter meant something upstream was failing to sync, which was wrong the moment the E2E
-sweeper — a legitimate caller of (2) that runs every thirty minutes — was taken seriously:
-`reason="operator"` is expected to be nonzero there, and only `reason="sync_failed"` is a
-never-event. Same counter, two contracts.
+The alarm is therefore on the series, not the total, and it is a claim about **steady state rather
+than about every run** — a distinction worth keeping explicit, because the same document describes a
+test that deliberately drives `reason="sync_failed"` to one. A metric that is never allowed to
+reach one in any circumstances could not have a test asserting it does.
+
+An earlier draft of this paragraph said a nonzero counter meant something upstream was failing to
+sync, which was wrong the moment the E2E sweeper — a legitimate caller of (2) that runs every thirty
+minutes — was taken seriously: `reason="operator"` is expected to be nonzero there, and only
+`reason="sync_failed"` is a never-event. Same counter, two contracts.
 
 Case (1) is reachable from `Tick`, so the property needs an exception and **`docs/testing.md` says
 so**: its ordering row now reads "preceded by a successful sync for it, or by a recorded
