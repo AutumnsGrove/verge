@@ -187,8 +187,11 @@ func TestList(t *testing.T) {
 
 	t.Run("happy/empty_list_is_not_an_error", func(t *testing.T) {
 		c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.RawQuery != "" {
-				t.Errorf("an empty label produced a query: %q", r.URL.RawQuery)
+			if got := r.URL.Query().Get("label_selector"); got != "" {
+				t.Errorf("an empty label produced a selector: %q", got)
+			}
+			if got := r.URL.Query().Get("per_page"); got != "50" {
+				t.Errorf("per_page = %q, want 50", got)
 			}
 			fmt.Fprint(w, `{"servers":[]}`)
 		})
@@ -207,6 +210,102 @@ func TestList(t *testing.T) {
 		})
 		if _, err := c.List(context.Background(), ""); err == nil {
 			t.Fatal("List accepted malformed JSON")
+		}
+	})
+}
+
+// TestListFollowsPagination is the failure the review found: the API paginates,
+// the default page is smaller than a deployment can get to, and returning one page
+// would make the orphan sweep silently blind to the rest.
+func TestListFollowsPagination(t *testing.T) {
+	var pages []string
+	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		page := r.URL.Query().Get("page")
+		pages = append(pages, page)
+		switch page {
+		case "1":
+			fmt.Fprintf(w, `{"servers":[%s],"meta":{"pagination":{"page":1,"next_page":2}}}`,
+				fmt.Sprintf(serverJSON, "running"))
+		case "2":
+			fmt.Fprint(w, `{"servers":[{"id":43,"status":"off","created":"2026-11-22T11:00:00+00:00","labels":{}}],
+				"meta":{"pagination":{"page":2,"next_page":null}}}`)
+		default:
+			t.Errorf("requested an unexpected page: %q", page)
+		}
+	})
+
+	got, err := c.List(context.Background(), "verge=machine")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("List returned %d machines across %v, want 2", len(got), pages)
+	}
+	if len(pages) != 2 {
+		t.Fatalf("List fetched %d pages, want 2", len(pages))
+	}
+	if got[1].ID != "hetzner:43" {
+		t.Fatalf("second page was not included: %v", got)
+	}
+}
+
+// TestPaginationIsBounded keeps a next_page that never clears from spinning.
+func TestPaginationIsBounded(t *testing.T) {
+	calls := 0
+	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		fmt.Fprintf(w, `{"servers":[],"meta":{"pagination":{"next_page":%d}}}`, calls+1)
+	})
+
+	if _, err := c.List(context.Background(), ""); err == nil {
+		t.Fatal("List accepted an endless next_page")
+	}
+}
+
+// TestNamesAreUnique is the bug that would have allowed exactly one machine per
+// project: the API requires names to be unique, and a constant name means the
+// second create is rejected.
+func TestNamesAreUnique(t *testing.T) {
+	names := map[string]bool{}
+	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Name string `json:"name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decoding the create body: %v", err)
+		}
+		names[body.Name] = true
+		fmt.Fprintf(w, `{"server":%s}`, fmt.Sprintf(serverJSON, "starting"))
+	})
+
+	for i := 0; i < 5; i++ {
+		if _, err := c.Create(context.Background(), firefly.Spec{Image: "ubuntu-24.04"}); err != nil {
+			t.Fatalf("Create %d: %v", i, err)
+		}
+	}
+	if len(names) != 5 {
+		t.Fatalf("five creates produced %d distinct names: %v", len(names), names)
+	}
+
+	t.Run("happy/an_explicit_name_is_used", func(t *testing.T) {
+		before := len(names)
+		if _, err := c.Create(context.Background(), firefly.Spec{Name: "runner-a"}); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if !names["runner-a"] {
+			t.Fatalf("the requested name was not used: %v", names)
+		}
+		if len(names) != before+1 {
+			t.Fatalf("names = %v", names)
+		}
+	})
+
+	t.Run("bad/an_invalid_name_is_refused_before_the_request", func(t *testing.T) {
+		c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			t.Error("an invalid name reached the provider")
+		})
+		if _, err := c.Create(context.Background(), firefly.Spec{Name: "Runner_A"}); err == nil {
+			t.Fatal("Create accepted an invalid server name")
 		}
 	})
 }

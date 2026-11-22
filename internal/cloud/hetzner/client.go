@@ -11,6 +11,8 @@ package hetzner
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +20,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/AutumnsGrove/verge/internal/firefly"
@@ -25,6 +28,16 @@ import (
 
 // DefaultBaseURL is the public API root.
 const DefaultBaseURL = "https://api.hetzner.cloud/v1"
+
+const (
+	// listPageSize is the API maximum, chosen so a normal deployment needs one
+	// page and the loop is a formality.
+	listPageSize = 50
+
+	// maxListPages bounds the walk. A next_page that never clears would otherwise
+	// spin forever against a provider that is answering honestly.
+	maxListPages = 100
+)
 
 // Client talks to the Hetzner Cloud API.
 type Client struct {
@@ -116,8 +129,12 @@ func (e errAPI) Error() string {
 
 // Create asks for a machine and returns its id.
 func (c *Client) Create(ctx context.Context, spec firefly.Spec) (firefly.MachineID, error) {
+	name, err := serverName(spec.Name)
+	if err != nil {
+		return "", err
+	}
 	body := map[string]any{
-		"name":      spec.Labels["verge-machine"],
+		"name":      name,
 		"image":     spec.Image,
 		"labels":    spec.Labels,
 		"user_data": string(spec.CloudInit),
@@ -127,12 +144,6 @@ func (c *Client) Create(ctx context.Context, spec firefly.Spec) (firefly.Machine
 	}
 	if spec.Region != "" {
 		body["location"] = spec.Region
-	}
-	// A name is required by the API and a name derived from the label keeps two
-	// deployments distinguishable in the console. It is not identity: firefly
-	// never reads it back.
-	if body["name"] == "" {
-		body["name"] = "verge"
 	}
 
 	var out struct {
@@ -171,22 +182,48 @@ func (c *Client) List(ctx context.Context, label string) ([]firefly.CloudMachine
 		path += "?label_selector=" + url.QueryEscape(label)
 	}
 
-	var out struct {
-		Servers []apiServer `json:"servers"`
-	}
-	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
-		return nil, err
-	}
+	// The listing is paginated, and the default page size is smaller than a
+	// deployment can get to. Returning the first page would make the orphan sweep
+	// silently blind to the rest -- the same shape of failure as ListDrops, arrived
+	// at through pagination instead of eventual consistency, and just as quiet.
+	var machines []firefly.CloudMachine
+	for page := 1; ; page++ {
+		pagePath := path
+		sep := "?"
+		if strings.Contains(pagePath, "?") {
+			sep = "&"
+		}
+		pagePath += sep + "per_page=" + strconv.Itoa(listPageSize) + "&page=" + strconv.Itoa(page)
 
-	machines := make([]firefly.CloudMachine, 0, len(out.Servers))
-	for _, s := range out.Servers {
-		m, err := convert(s)
-		if err != nil {
+		var out struct {
+			Servers []apiServer `json:"servers"`
+			Meta    struct {
+				Pagination struct {
+					NextPage any `json:"next_page"`
+				} `json:"pagination"`
+			} `json:"meta"`
+		}
+		if err := c.do(ctx, http.MethodGet, pagePath, nil, &out); err != nil {
 			return nil, err
 		}
-		machines = append(machines, m)
+
+		for _, s := range out.Servers {
+			m, err := convert(s)
+			if err != nil {
+				return nil, err
+			}
+			machines = append(machines, m)
+		}
+
+		// next_page is null on the last page and a number otherwise. Treating it
+		// as `any` is what makes both work without a custom unmarshaler.
+		if out.Meta.Pagination.NextPage == nil {
+			return machines, nil
+		}
+		if page > maxListPages {
+			return nil, fmt.Errorf("hetzner: listing exceeded %d pages", maxListPages)
+		}
 	}
-	return machines, nil
 }
 
 // Delete destroys a machine.
@@ -298,6 +335,46 @@ func convertStatus(status string) (firefly.ProviderStatus, error) {
 	default:
 		return "", fmt.Errorf("hetzner: unknown server status %q", status)
 	}
+}
+
+// serverName returns the name to give a machine.
+//
+// The API requires a name, requires it to be a valid hostname, and requires it to
+// be *unique within the project*. A constant name therefore does not merely look
+// untidy: it means the second machine in a project is rejected with
+// uniqueness_error, and a caller can manage exactly one machine forever. Firefly
+// never reads the name back -- identity is the provider id -- so uniqueness is the
+// only property that matters, and a random suffix is the cheapest way to get it.
+func serverName(requested string) (string, error) {
+	if requested != "" {
+		if !validHostname(requested) {
+			return "", fmt.Errorf("hetzner: %q is not a valid server name (lowercase letters, digits, and hyphens)", requested)
+		}
+		return requested, nil
+	}
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("hetzner: generating a server name: %w", err)
+	}
+	return "verge-" + hex.EncodeToString(b[:]), nil
+}
+
+// validHostname checks the subset of RFC 1123 the API accepts. It is a guard, not
+// a validator: a name that passes here and is rejected by the API is still an
+// error the caller sees, which is the right way round.
+func validHostname(s string) bool {
+	if len(s) == 0 || len(s) > 63 {
+		return false
+	}
+	for i, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+		case r == '-' && i != 0 && i != len(s)-1:
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // machineID is how a provider id becomes firefly's opaque one. The prefix keeps a
