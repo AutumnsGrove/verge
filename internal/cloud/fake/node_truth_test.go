@@ -250,57 +250,131 @@ func TestNodeTruthTable(t *testing.T) {
 	}
 }
 
-// TestNodeAnswersDoNotDependOnOrder is the property the caching bug violated.
+// TestNodeAnswersDoNotDependOnOrder states the property the caching bug violated,
+// by running each scenario twice: once asking at every step, once asking only at
+// the end.
 //
-// Every case is asked twice, after a further observation and without one, and the
-// answers must match. It is cheap, and it is the assertion that would have caught
-// the cached join instant immediately rather than three reviews later.
+// The first version of this test asserted a fixed answer and used two separate
+// fakes, so it passed with a cache in place -- it compared nothing. The property
+// is not "the answer is true", it is "asking earlier cannot change the answer
+// later", and the only way to test that is to run the same history both ways.
+//
+// The discriminating case is an observation during the join delay followed by a
+// delete before the join instant lands: the honest answer is false forever, while
+// a cache primed on the first ask reports true for good.
+type step struct {
+	advance time.Duration
+	delete  bool
+	forget  bool
+}
+
 func TestNodeAnswersDoNotDependOnOrder(t *testing.T) {
 	ctx := context.Background()
 
-	build := func(t *testing.T) (*Cloud, *Network, firefly.MachineID) {
-		t.Helper()
-		c, n := newBoth(t)
-		id, err := c.Create(ctx, spec())
-		if err != nil {
-			t.Fatalf("Create: %v", err)
-		}
-		c.Advance(time.Minute)
-		if err := c.Delete(ctx, id); err != nil {
-			t.Fatalf("Delete: %v", err)
-		}
-		c.Advance(time.Hour)
-		return c, n, id
+	scenarios := []struct {
+		name      string
+		boot      time.Duration
+		joinDelay time.Duration
+		steps     []step
+	}{
+		{
+			name: "sad/primed_in_the_join_delay_then_deleted_before_joining",
+			boot: 0, joinDelay: time.Minute,
+			steps: []step{{advance: 30 * time.Second}, {delete: true}, {advance: time.Hour}},
+		},
+		{
+			name: "sad/primed_while_booting_then_deleted",
+			boot: 2 * time.Minute, joinDelay: 0,
+			steps: []step{{advance: time.Minute}, {delete: true}, {advance: time.Hour}},
+		},
+		{
+			name: "sad/primed_before_boot_then_404_reaped",
+			boot: 2 * time.Minute, joinDelay: 0,
+			steps: []step{{advance: time.Second}, {delete: true}, {advance: time.Hour}},
+		},
+		{
+			name: "happy/primed_in_the_join_delay_then_joins",
+			boot: 0, joinDelay: time.Minute,
+			steps: []step{{advance: 30 * time.Second}, {advance: time.Minute}},
+		},
+		{
+			name: "happy/joined_then_deleted",
+			boot: 0, joinDelay: 0,
+			steps: []step{{advance: time.Minute}, {delete: true}, {advance: time.Hour}},
+		},
+		{
+			name: "happy/joined_then_deleted_then_forgotten",
+			boot: 0, joinDelay: 0,
+			steps: []step{{advance: time.Minute}, {delete: true}, {advance: time.Hour}, {forget: true}},
+		},
 	}
 
-	// Asked first after the machine is gone: the unprimed path.
-	t.Run("happy/unprimed", func(t *testing.T) {
-		_, n, id := build(t)
-		if exists, err := n.NodeExists(ctx, id); err != nil || !exists {
-			t.Fatalf("NodeExists = %v, %v; want true", exists, err)
-		}
-	})
+	for _, sc := range scenarios {
+		t.Run(sc.name, func(t *testing.T) {
+			// run replays the scenario, asking after every step when observe is
+			// true, and returns the final answer either way.
+			run := func(observe bool) (exists, joined bool) {
+				c := New(fakeBase)
+				c.Boot(sc.boot)
+				n := NewNetwork(c).JoinDelay(sc.joinDelay)
 
-	// Asked once before the delete lands, then again after.
-	t.Run("happy/primed_then_reasked", func(t *testing.T) {
-		c, n := newBoth(t)
-		id, err := c.Create(ctx, spec())
-		if err != nil {
-			t.Fatalf("Create: %v", err)
-		}
-		c.Advance(time.Minute)
-		if _, err := n.NodeExists(ctx, id); err != nil {
-			t.Fatalf("NodeExists: %v", err)
-		}
-		if err := c.Delete(ctx, id); err != nil {
-			t.Fatalf("Delete: %v", err)
-		}
-		c.Advance(time.Hour)
+				id, err := c.Create(ctx, spec())
+				if err != nil {
+					t.Fatalf("Create: %v", err)
+				}
 
-		for i := 0; i < 3; i++ {
-			if exists, err := n.NodeExists(ctx, id); err != nil || !exists {
-				t.Fatalf("NodeExists on ask %d = %v, %v; want true", i+1, exists, err)
+				ask := func() {
+					if !observe {
+						return
+					}
+					if _, err := n.NodeExists(ctx, id); err != nil {
+						t.Fatalf("NodeExists: %v", err)
+					}
+					if _, err := n.Joined(ctx, id); err != nil {
+						t.Fatalf("Joined: %v", err)
+					}
+				}
+
+				ask()
+				for _, st := range sc.steps {
+					if st.advance > 0 {
+						c.Advance(st.advance)
+					}
+					if st.delete {
+						if err := c.Delete(ctx, id); err != nil {
+							t.Fatalf("Delete: %v", err)
+						}
+					}
+					if st.forget {
+						if err := n.Forget(ctx, id); err != nil {
+							t.Fatalf("Forget: %v", err)
+						}
+					}
+					ask()
+				}
+
+				exists, err = n.NodeExists(ctx, id)
+				if err != nil {
+					t.Fatalf("NodeExists: %v", err)
+				}
+				joined, err = n.Joined(ctx, id)
+				if err != nil {
+					t.Fatalf("Joined: %v", err)
+				}
+				return exists, joined
 			}
-		}
-	})
+
+			quietExists, quietJoined := run(false)
+			askedExists, askedJoined := run(true)
+
+			if quietExists != askedExists {
+				t.Errorf("NodeExists depends on when it was asked: %v unobserved, %v observed",
+					quietExists, askedExists)
+			}
+			if quietJoined != askedJoined {
+				t.Errorf("Joined depends on when it was asked: %v unobserved, %v observed",
+					quietJoined, askedJoined)
+			}
+		})
+	}
 }
