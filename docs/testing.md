@@ -72,8 +72,15 @@ is the one static check that needs a warm cache or a network, and burying it in 
 claims "needs: nothing" made that claim false. It is `make vuln`, and it is excluded from anything
 promised to work with the network unplugged.
 
-`make vuln` runs on every pull request: `.github/workflows/go.yml` calls it, and it is the only job
-in that workflow which needs a network. A pull request cannot merge without it passing.
+`make vuln` runs on every pull request: `.github/workflows/go.yml` calls it. It is the only job whose
+*check* consults the vulnerability database — the `static` job also reaches the network, but only to
+install its linters, so "offline" describes what `make vet` does once the tools are present, not
+what the job does.
+
+Nothing currently *requires* any of this. `main` has no branch protection and no rulesets, so the
+workflow reports and a merge can ignore it; a pull request can go into `main` with every check red.
+Making the checks required is a repository setting rather than a workflow one, and until it is
+configured this document should not describe them as gates.
 
 ### Why contract and full are separate
 
