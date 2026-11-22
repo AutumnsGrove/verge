@@ -34,12 +34,17 @@ type LeaseID string
 // Tick idempotent under a frozen clock. Both are properties asserted in
 // docs/testing.md, and this is the decision that earns them.
 type Lease struct {
-	ID     LeaseID
-	Holder string        // the caller's name; never parsed by firefly
-	Kind   Kind          //
-	Start  time.Time     // set by firefly from now, never by the caller
-	TTL    time.Duration //
+	ID      LeaseID
+	Machine MachineID // which machine this lease keeps alive
+	Holder  string    // the caller's name; never parsed by firefly
+	Kind    Kind      //
+	Start   time.Time // set by firefly from now, never by the caller
+	TTL     time.Duration
 }
+
+// Valid reports whether k is one of the three kinds. It exists because the kind
+// is stored, and a document read back with an unknown kind would otherwise be
+// counted as if it were real.
 
 var (
 	// ErrLeaseExpired means the lease had already lapsed when it was renewed.
@@ -58,6 +63,18 @@ var (
 // ExpiresAt is the first instant at which the lease is no longer live.
 func (l Lease) ExpiresAt() time.Time {
 	return l.Start.Add(l.TTL)
+}
+
+// Valid reports whether k is one of the three kinds. It exists because the kind
+// is stored, and a document read back with an unknown kind would otherwise be
+// counted as if it were real.
+func (k Kind) Valid() bool {
+	switch k {
+	case Turn, Session, Subscription:
+		return true
+	default:
+		return false
+	}
 }
 
 // Live reports whether the lease is live at now.

@@ -22,6 +22,10 @@ internal/
     fsm_test.go               one case per transition — enforced (see "Gates")
     lease.go
     lease_test.go             table-driven: happy/, sad/, bad/
+    document.go               the durable state: machines, leases, validation
+    document_test.go
+    store.go                  the Store interface and an in-memory implementation
+    store_test.go             round-trip, rejected writes, copy isolation, race
     firefly_test.go           integration: the real loop, fake cloud, fake clock
     order_test.go             the sync-before-delete invariant
     testdata/golden/          recorded event logs, replayed by the fake
@@ -31,6 +35,9 @@ internal/
     contract_test.go          //go:build contract — real API, test project
   cloud/fake/
     fake.go                   the one shared fake: provider and Network
+  store/r2/
+    store.go                  the state document in object storage
+    store_test.go
   net/tailnet/
     client.go                 the real Network: join, observe, forget
     client_test.go
