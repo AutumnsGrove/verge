@@ -695,3 +695,90 @@ func TestRetryDelayIsCapped(t *testing.T) {
 		})
 	}
 }
+
+// TestRenewAfterPruningStillSaysExpired is the contract pruning nearly broke.
+//
+// Tick removes a lapsed lease, so Renew no longer finds the record and falls
+// through to the not-found path. Without a distinction there, a supervisor that
+// treats ErrNoSuchLease as a bug would alert on the ordinary lapse path.
+func TestRenewAfterPruningStillSaysExpired(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("sad/previously_minted_is_expired", func(t *testing.T) {
+		// NextLeaseNumber is 5, so lease-3 existed and is gone.
+		cfg := testConfig(t)
+		doc := Document{Version: DocumentVersion, NextLeaseNumber: 5}
+		if err := cfg.Store.Save(ctx, doc); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		g, err := New(cfg)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		if err := g.Renew(ctx, "lease-3", time.Hour, regBase); !errors.Is(err, ErrLeaseExpired) {
+			t.Fatalf("Renew(lease-3) = %v, want ErrLeaseExpired", err)
+		}
+	})
+
+	t.Run("bad/never_minted_is_no_such_lease", func(t *testing.T) {
+		cfg := testConfig(t)
+		doc := Document{Version: DocumentVersion, NextLeaseNumber: 5}
+		if err := cfg.Store.Save(ctx, doc); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		g, err := New(cfg)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		if err := g.Renew(ctx, "lease-99", time.Hour, regBase); !errors.Is(err, ErrNoSuchLease) {
+			t.Fatalf("Renew(lease-99) = %v, want ErrNoSuchLease", err)
+		}
+	})
+
+	t.Run("bad/not_even_our_format", func(t *testing.T) {
+		cfg := testConfig(t)
+		doc := Document{Version: DocumentVersion, NextLeaseNumber: 5}
+		if err := cfg.Store.Save(ctx, doc); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		g, err := New(cfg)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		if err := g.Renew(ctx, "not-a-lease", time.Hour, regBase); !errors.Is(err, ErrNoSuchLease) {
+			t.Fatalf("Renew(garbage) = %v, want ErrNoSuchLease", err)
+		}
+	})
+}
+
+// TestRenewAfterPruningThroughATick is the same contract, reached the way a
+// supervisor would reach it: acquire, let a tick prune the lapsed record, renew.
+func TestRenewAfterPruningThroughATick(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(t)
+	f, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	m := seedMachine(t, f)
+
+	id, err := f.Acquire(ctx, m, "turn:01J8", Turn, time.Minute, regBase)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	if _, err := f.Tick(ctx, regBase.Add(2*time.Minute)); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	doc, err := cfg.Store.Load(ctx)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(doc.Leases) != 0 {
+		t.Fatalf("the lapsed lease was not pruned: %d leases", len(doc.Leases))
+	}
+
+	if err := f.Renew(ctx, id, time.Hour, regBase.Add(3*time.Minute)); !errors.Is(err, ErrLeaseExpired) {
+		t.Fatalf("Renew after pruning = %v, want ErrLeaseExpired", err)
+	}
+}

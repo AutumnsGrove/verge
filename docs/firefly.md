@@ -202,7 +202,11 @@ pruned by `Tick` once they are past `Start+TTL` and no machine's teardown still 
 the state document does not grow without bound. Until pruned they are inert: `Live` ignores them,
 so a stale record cannot hold a machine open.
 
-`Renew` on a lapsed lease returns `ErrLeaseExpired` rather than quietly re-acquiring. The
+`Renew` on a lapsed lease returns `ErrLeaseExpired` rather than quietly re-acquiring — and it still
+does after `Tick` has pruned the record, because ids are minted from a counter: an id at or below
+`NextLeaseNumber` existed and is gone, while one above it was never issued. The id is opaque to
+callers and not opaque to the thing that minted it, which is what keeps the ordinary lapse path from
+reporting the error callers are told to treat as a bug. The
 distinction matters — a silent re-acquire would let a supervisor hold a machine open with a lease
 the caller believes it lost — and the `sad/` case exists to assert the error rather than the
 behaviour.

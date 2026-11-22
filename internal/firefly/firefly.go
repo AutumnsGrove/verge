@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -131,9 +132,13 @@ func (f *Firefly) Load(ctx context.Context) error {
 
 // Lease errors that a caller has to distinguish.
 var (
-	// ErrNoSuchLease means the id is not a lease this firefly knows. It is
-	// distinct from ErrLeaseExpired because they mean different things to a
-	// caller: one is a bug, the other is a session that needs to re-acquire.
+	// ErrNoSuchLease means the id is not one this firefly ever minted, which is a
+	// bug in the caller rather than a lapse.
+	//
+	// It is distinct from ErrLeaseExpired, and the distinction survives pruning:
+	// ids are minted from a counter, so an id at or below NextLeaseNumber existed
+	// and is gone (lapsed, or released), while one above it was never issued. The
+	// id is opaque to callers; it is not opaque to the thing that minted it.
 	ErrNoSuchLease = errors.New("firefly: no such lease")
 
 	// ErrUnknownMachine means a lease was requested on a machine the document does
@@ -206,6 +211,13 @@ func (f *Firefly) Renew(ctx context.Context, id LeaseID, ttl time.Duration, now 
 			doc.Leases[i] = renewed
 			return nil
 		}
+
+		// Not in the document. It may have lapsed and been pruned, which is the
+		// ordinary path a supervisor takes, or it may never have existed. The
+		// counter is what tells them apart after the record is gone.
+		if n, ok := leaseNumber(id); ok && n <= doc.NextLeaseNumber {
+			return fmt.Errorf("%w: %s", ErrLeaseExpired, id)
+		}
 		return fmt.Errorf("%w: %s", ErrNoSuchLease, id)
 	})
 }
@@ -226,6 +238,25 @@ func (f *Firefly) Release(ctx context.Context, id LeaseID) error {
 		doc.Leases = kept
 		return nil
 	})
+}
+
+// leaseNumber reads the counter out of an id this package minted.
+//
+// The format is internal: a caller treats the id as opaque, which is why this is
+// allowed to parse it and nothing else is. It is what keeps ErrLeaseExpired
+// meaning "it lapsed" after pruning has removed the record, instead of collapsing
+// into an error that callers are told to treat as a bug.
+func leaseNumber(id LeaseID) (uint64, bool) {
+	s := string(id)
+	const prefix = "lease-"
+	if !strings.HasPrefix(s, prefix) {
+		return 0, false
+	}
+	n, err := strconv.ParseUint(s[len(prefix):], 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 // Snapshot is a read-only view of the machines and their live lease counts.
