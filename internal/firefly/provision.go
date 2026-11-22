@@ -43,16 +43,12 @@ func (f *Firefly) Provision(ctx context.Context, spec Spec, now time.Time) (Mach
 	// document cannot be rebuilt from the provider after a lost write -- so it
 	// would bill forever, unmanaged. Overwriting rather than merging is the point:
 	// a caller that passes the wrong label must not be able to create a machine
-	// nobody can see.
-	key, value, ok := splitLabel(f.cfg.Label)
-	if !ok {
-		return "", fmt.Errorf("%w: Label must be key=value", ErrConfig)
-	}
+	// nobody can see. New has already parsed the label, so this cannot fail here.
 	labels := make(map[string]string, len(spec.Labels)+1)
 	for k, v := range spec.Labels {
 		labels[k] = v
 	}
-	labels[key] = value
+	labels[f.labelKey] = f.labelValue
 	spec.Labels = labels
 
 	id, err := f.cfg.Cloud.Create(ctx, spec)

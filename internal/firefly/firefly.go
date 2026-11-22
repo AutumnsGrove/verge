@@ -81,6 +81,13 @@ type Firefly struct {
 	doc    Document
 	loaded bool
 
+	// labelKey and labelValue are Config.Label, parsed once at construction. New
+	// rejects anything that is not key=value, so Provision does not need to
+	// re-check what it cannot fail -- a runtime branch nothing can reach is a
+	// branch nothing can test.
+	labelKey   string
+	labelValue string
+
 	// The failed-create record. It is not in the document because a failed create
 	// leaves nothing to record: there is no machine, and the table's row is
 	// ABSENT --CreateFailed--> ABSENT. A restart retrying immediately is fine.
@@ -100,10 +107,6 @@ func New(cfg Config) (*Firefly, error) {
 		return nil, fmt.Errorf("%w: no Store", ErrConfig)
 	case cfg.Label == "":
 		return nil, fmt.Errorf("%w: no Label", ErrConfig)
-	default:
-		if _, _, ok := splitLabel(cfg.Label); !ok {
-			return nil, fmt.Errorf("%w: Label must be key=value, got %q", ErrConfig, cfg.Label)
-		}
 	}
 	switch {
 	case cfg.MaxLifetime <= 0:
@@ -127,7 +130,11 @@ func New(cfg Config) (*Firefly, error) {
 	case cfg.RetryMax < cfg.RetryBase:
 		return nil, fmt.Errorf("%w: RetryMax must be at least RetryBase", ErrConfig)
 	}
-	return &Firefly{cfg: cfg}, nil
+	key, value, ok := splitLabel(cfg.Label)
+	if !ok {
+		return nil, fmt.Errorf("%w: Label must be key=value, got %q", ErrConfig, cfg.Label)
+	}
+	return &Firefly{cfg: cfg, labelKey: key, labelValue: value}, nil
 }
 
 // Config returns the configuration, for reporting.

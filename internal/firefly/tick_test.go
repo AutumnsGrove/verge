@@ -882,10 +882,12 @@ func TestProvision(t *testing.T) {
 			t.Fatal("the first create succeeded")
 		}
 
-		// The provider recovers, and the retry is allowed once the delay passed.
-		h2 := newHarness(t)
-		if _, err := h2.f.Provision(ctx, firefly.Spec{}, at(0)); err != nil {
-			t.Fatalf("Provision on a healthy provider: %v", err)
+		// Retried on the same firefly, past RetryBase: the backoff is over, so the
+		// error must be the provider's again rather than ErrProvisioningBackoff.
+		// Building a second Firefly instead would assert nothing about this one.
+		_, err := h.f.Provision(ctx, firefly.Spec{}, at(30*time.Second))
+		if err == nil || errors.Is(err, firefly.ErrProvisioningBackoff) {
+			t.Fatalf("second attempt = %v, want the provider's error", err)
 		}
 	})
 }
