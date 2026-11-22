@@ -153,7 +153,11 @@ func (n *Network) joinInstant(id firefly.MachineID) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	at := m.readyAt.Add(n.joinDelay)
-	if !m.deleteAt.IsZero() && !m.deleteAt.After(at) {
+	// Whether it ever joined depends on when it stopped existing, not on which
+	// path reaped it: a normal delete completes at deleteAt, and a 404 delete is
+	// immediate. Comparing against the instant covers both; comparing against
+	// deleteAt alone missed the 404 path entirely.
+	if !m.goneAt.IsZero() && !m.goneAt.After(at) {
 		return time.Time{}, false
 	}
 	return at, true

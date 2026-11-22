@@ -60,6 +60,7 @@ type machine struct {
 	createdAt time.Time
 	readyAt   time.Time // zero means never: the boot never finishes
 	deleteAt  time.Time // zero means no delete has been requested
+	goneAt    time.Time // zero means it still exists; the instant it stopped
 	gone      bool
 	publicIP  string
 }
@@ -272,8 +273,13 @@ func (c *Cloud) Delete(ctx context.Context, id firefly.MachineID) error {
 	}
 
 	if c.deleteReturns404 {
-		if m, ok := c.mach[id]; ok {
+		// The provider says it never had this machine, so it is gone as of now.
+		// goneAt is what lets the network half tell "reaped before it could join"
+		// from "joined and then reaped" -- a bare flag cannot express both, and
+		// this path used to set only the flag.
+		if m, ok := c.mach[id]; ok && !m.gone {
 			m.gone = true
+			m.goneAt = c.now
 		}
 		return nil
 	}
@@ -293,6 +299,7 @@ func (c *Cloud) Delete(ctx context.Context, id firefly.MachineID) error {
 		return nil
 	}
 	m.deleteAt = c.now.Add(c.deleteDelay)
+	m.goneAt = m.deleteAt
 	return nil
 }
 
@@ -331,7 +338,7 @@ func (c *Cloud) expired(m *machine) bool {
 	if m.gone {
 		return true
 	}
-	if !m.deleteAt.IsZero() && !c.now.Before(m.deleteAt) {
+	if !m.goneAt.IsZero() && !c.now.Before(m.goneAt) {
 		m.gone = true
 		return true
 	}

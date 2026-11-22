@@ -209,6 +209,57 @@ func TestLingeringNodeWithoutPriming(t *testing.T) {
 	})
 }
 
+// TestDeleteReturns404NeverJoins is the same lie as TestDeletedBeforeBootNeverJoins
+// through a different door.
+//
+// A 404 delete reaps the machine immediately and used to record only a flag, so the
+// join-instant comparison -- which looked at deleteAt -- never saw it. A machine
+// reaped before it booted then grew a node, and TERMINATING was told to Forget one
+// that never existed.
+func TestDeleteReturns404NeverJoins(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("sad/reaped_before_boot_has_no_node", func(t *testing.T) {
+		c := New(fakeBase).Boot(2 * time.Minute).DeleteReturns404()
+		n := NewNetwork(c)
+
+		id, err := c.Create(ctx, spec())
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if err := c.Delete(ctx, id); err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+		c.Advance(time.Hour)
+
+		if _, err := c.Describe(ctx, id); !errors.Is(err, firefly.ErrNoSuchMachine) {
+			t.Fatalf("the machine should be gone: %v", err)
+		}
+		if exists, err := n.NodeExists(ctx, id); err != nil || exists {
+			t.Fatalf("NodeExists after a 404 reap before boot = %v, %v; want false, nil", exists, err)
+		}
+	})
+
+	t.Run("happy/reaped_after_it_joined_still_lingers", func(t *testing.T) {
+		c := New(fakeBase).Boot(0).DeleteReturns404()
+		n := NewNetwork(c)
+
+		id, err := c.Create(ctx, spec())
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		c.Advance(time.Minute)
+		if err := c.Delete(ctx, id); err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+		c.Advance(time.Hour)
+
+		if exists, err := n.NodeExists(ctx, id); err != nil || !exists {
+			t.Fatalf("NodeExists after a 404 reap following a join = %v, %v; want true, nil", exists, err)
+		}
+	})
+}
+
 // TestMetadataMissing is the second half of the readiness rule: the machine runs,
 // the provider is happy, and nothing ever joins.
 func TestMetadataMissing(t *testing.T) {
