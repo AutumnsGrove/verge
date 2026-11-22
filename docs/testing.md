@@ -29,6 +29,11 @@ internal/
     client.go                 the real client
     client_test.go            against httptest
     contract_test.go          //go:build contract — real API, test project
+  cloud/fake/
+    fake.go                   the one shared fake: provider and Network
+  net/tailnet/
+    client.go                 the real Network: join, observe, forget
+    client_test.go
   rpc/relay/
     relay.go                  the pi JSONL reader
     relay_test.go
@@ -92,9 +97,16 @@ test advances it, which is what makes the integration tier fast.
 | `ListDrops(id)` | eventual consistency: the API doesn't know about a machine that exists |
 | `CreateIsSlow(d)` | a request that returns after the caller's deadline |
 | `MetadataMissing()` | a booted machine that never answers |
+| `ForgetRefuses(n)` | the node record outlives its machine and refuses removal for n attempts |
 
 **Conformance.** The fake must reproduce the recorded golden event logs from the contract tier.
 When it cannot, the fake is wrong or the cloud changed, and either way a human looks.
+
+**The same fake answers for `Network`.** `Joined` is half of `READY` and `NodeExists` is half of
+deletion, so a fake that cannot hold a node record makes both untestable. It reads the same state:
+a node whose machine is `deleted` stays present until `Forget` succeeds, which is what makes
+`ForgetRefuses` and "a node that lingers on a private network" reproducible rather than
+theoretical.
 
 ## The clock
 
@@ -110,7 +122,8 @@ visible in review.
 
 - **happy/**: the normal path. Provision → ready → work → sync → delete.
 - **sad/**: an expected failure the design handles. Create rejected, boot stalls, sync errors,
-  delete 404s, a lease renewal arrives late, a subscription expires.
+  a sync that never succeeds and ends in a recorded abandonment, delete 404s, a node that outlives
+  its machine and refuses to be forgotten, a lease renewal arrives late, a subscription expires.
 - **bad/**: hostile input the design never invited. This is the category most suites skip and the
   one that finds real bugs in a proxy and a relay.
 
@@ -156,12 +169,21 @@ golden one.
 
 | Property | Statement |
 |---|---|
-| ordering | over any generated event log, a `DELETE` for an instance is preceded by a successful sync for it |
+| ordering | over any generated event log, a `DELETE` for an instance is preceded by a successful sync for it, or by a recorded abandonment (below) |
 | idempotence | `Tick` twice with a frozen clock produces at most one transition |
 | monotonicity | adding a lease never makes an instance fade sooner |
 | monotonic clock | `Live(instance)` never grows as the clock advances with no renewal |
 | lease expiry | a lease with TTL t is live for exactly `[start, start+t)` |
 | release | `Release` is idempotent; a second release is not an error |
+
+**The ordering property has one stated exception, and the generator says so.** A machine whose sync
+cannot succeed would bill forever if the hard cap also refused to abandon the save, so at
+`MaxLifetime` it takes `--Abandoned-->` and is deleted: the loss is logged and counted, and the
+counter's steady state is zero (`docs/firefly.md`, "Where the ordering property yields").
+`order_test.go` therefore excludes the permanent-sync-failure fault from the ordering generator,
+except in the one `sad/` case that asserts the abandonment, and that case claims the counter is
+exactly one. The property is strict everywhere else — a `DELETE` with no sync and no recorded
+abandonment is a failure in every generated history.
 
 ## Strict test-first
 
