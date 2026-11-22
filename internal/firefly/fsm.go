@@ -163,13 +163,47 @@ var transitions = []Transition{
 	{Error, Capped, Syncing},
 }
 
-// retryOrigins returns the states an Error can be entered from, derived from
-// the table rather than listed again.
+// Valid reports whether s is one of the seven states.
 //
-// Two copies of this list would eventually disagree, and the disagreement would
-// show up as a document that validates but cannot be retried, or one that can be
-// retried into a state the table has no row for.
-func retryOrigins() map[State]struct{} {
+// It exists for the same reason Kind.Valid does: the state is persisted, so a
+// document read back with an unknown one would otherwise be accepted and then
+// match no row in the transition table — a machine that firefly owns and cannot
+// advance.
+func (s State) Valid() bool {
+	switch s {
+	case Absent, Provisioning, Ready, Draining, Syncing, Terminating, Error:
+		return true
+	default:
+		return false
+	}
+}
+
+// errorOrigins returns the states a machine can enter Error *from*, derived from
+// the table.
+//
+// This is what a stored Machine.Origin must be a member of: Origin records where
+// the machine was before it failed. It is deliberately not the same computation
+// as retryDestinations, which the previous version of this function conflated.
+// The two sets coincide for the current table, which is exactly why the mistake
+// was invisible: a future row into Error without a matching RetryDue row would
+// have produced a document that validates and can never be retried.
+func errorOrigins() map[State]struct{} {
+	out := make(map[State]struct{})
+	for _, tr := range transitions {
+		if tr.To == Error {
+			out[tr.From] = struct{}{}
+		}
+	}
+	return out
+}
+
+// retryDestinations returns where an Error may go on RetryDue, derived from the
+// table.
+//
+// TestOriginsAndRetriesAgree asserts it covers every entry in errorOrigins, so
+// the two cannot drift: a state that can fail must also be one an Error can
+// return to.
+func retryDestinations() map[State]struct{} {
 	out := make(map[State]struct{})
 	for _, tr := range transitions {
 		if tr.From == Error && tr.On == RetryDue {

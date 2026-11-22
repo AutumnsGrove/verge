@@ -207,6 +207,32 @@ func TestDocumentValidate(t *testing.T) {
 			},
 		},
 		{
+			// Without an explicit check these fall to the default arm and are
+			// accepted, and the machine then matches no row in the table.
+			name: "bad/unknown_state",
+			doc: Document{
+				Version: DocumentVersion,
+				Machines: []Machine{func() Machine {
+					m := readyMachine(machineID("m1"))
+					m.State = State("HAUNTING")
+					return m
+				}()},
+			},
+			isErr: true,
+		},
+		{
+			name: "bad/empty_state",
+			doc: Document{
+				Version: DocumentVersion,
+				Machines: []Machine{func() Machine {
+					m := readyMachine(machineID("m1"))
+					m.State = ""
+					return m
+				}()},
+			},
+			isErr: true,
+		},
+		{
 			name:  "bad/since_before_creation",
 			isErr: true,
 			doc: Document{
@@ -239,15 +265,27 @@ func TestDocumentValidate(t *testing.T) {
 	}
 }
 
-// TestErrorOriginMustHaveARetryRow pins the coupling between validation and the
-// transition table. If a row is added or removed, this is where the document
-// format notices.
-func TestErrorOriginMustHaveARetryRow(t *testing.T) {
-	valid := retryOrigins()
-	if len(valid) == 0 {
-		t.Fatal("retryOrigins() is empty, so ERROR could never be retried")
+// TestOriginsAndRetriesAgree pins the coupling between validation and the
+// transition table, in both directions.
+//
+// The earlier version walked `Error --RetryDue-->` destinations and assumed they
+// were the same set as "states that can enter Error". They coincide today, so it
+// passed while pinning nothing: a new row into Error without a matching retry row
+// would have produced documents that validate and can never be retried, failing
+// at save time rather than here.
+func TestOriginsAndRetriesAgree(t *testing.T) {
+	origins := errorOrigins()
+	retries := retryDestinations()
+
+	if len(origins) == 0 {
+		t.Fatal("no state enters ERROR, so the failure path is unreachable")
 	}
-	for origin := range valid {
+
+	for origin := range origins {
+		if _, ok := retries[origin]; !ok {
+			t.Errorf("%s can enter ERROR but has no ERROR --RetryDue--> row, so it could never leave", origin)
+		}
+
 		doc := Document{
 			Version: DocumentVersion,
 			Machines: []Machine{{
@@ -257,8 +295,52 @@ func TestErrorOriginMustHaveARetryRow(t *testing.T) {
 			}},
 		}
 		if err := doc.Validate(); err != nil {
-			t.Errorf("origin %s has a retry row but does not validate: %v", origin, err)
+			t.Errorf("%s is a legal origin but a document using it is rejected: %v", origin, err)
 		}
+
+		got, err := Next(Error, RetryDue, origin)
+		if err != nil {
+			t.Errorf("Next(ERROR, RetryDue, %s): %v", origin, err)
+			continue
+		}
+		if got != origin {
+			t.Errorf("Next(ERROR, RetryDue, %s) = %s, want %s", origin, got, origin)
+		}
+	}
+
+	// The other direction: retrying into a state that cannot itself fail would be
+	// a row with no way to come back.
+	for dest := range retries {
+		if _, ok := origins[dest]; !ok {
+			t.Errorf("ERROR retries to %s, which cannot enter ERROR", dest)
+		}
+	}
+}
+
+// TestStateValid covers the seven states and the ways of getting it wrong.
+func TestStateValid(t *testing.T) {
+	cases := []struct {
+		name  string
+		state State
+		want  bool
+	}{
+		{"happy/absent", Absent, true},
+		{"happy/provisioning", Provisioning, true},
+		{"happy/ready", Ready, true},
+		{"happy/draining", Draining, true},
+		{"happy/syncing", Syncing, true},
+		{"happy/terminating", Terminating, true},
+		{"happy/error", Error, true},
+		{"bad/empty", State(""), false},
+		{"bad/unknown", State("HAUNTING"), false},
+		{"bad/lowercase", State("ready"), false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.state.Valid(); got != c.want {
+				t.Fatalf("State(%q).Valid() = %v, want %v", c.state, got, c.want)
+			}
+		})
 	}
 }
 

@@ -87,7 +87,7 @@ func (d Document) Validate() error {
 		return fmt.Errorf("%w: got %d, want %d", ErrDocumentVersion, d.Version, DocumentVersion)
 	}
 
-	origins := retryOrigins()
+	origins := errorOrigins()
 
 	byID := make(map[MachineID]struct{}, len(d.Machines))
 	for _, m := range d.Machines {
@@ -98,6 +98,13 @@ func (d Document) Validate() error {
 			return fmt.Errorf("firefly: duplicate machine %q", m.ID)
 		}
 		byID[m.ID] = struct{}{}
+
+		// The state is persisted, so it is checked before it is trusted to select
+		// a branch below. Without this, an unknown state falls through to the
+		// default arm and is accepted, and the machine then matches no row.
+		if !m.State.Valid() {
+			return fmt.Errorf("firefly: machine %q is in unknown state %q", m.ID, m.State)
+		}
 
 		if m.CreatedAt.IsZero() {
 			return fmt.Errorf("firefly: machine %q has no CreatedAt", m.ID)
