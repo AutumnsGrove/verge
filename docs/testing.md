@@ -37,9 +37,9 @@ internal/
     order_test.go             the sync-before-delete invariant
     testdata/golden/          recorded event logs, replayed by the fake
   cloud/hetzner/
-    client.go                 the real client
-    client_test.go            against httptest
-    contract_test.go          //go:build contract — real API, test project
+    client.go                 the real client: four calls, no retries
+    client_test.go            against httptest: decoding, 404s, status mapping
+    contract_test.go          //go:build contract — real API, test project (not written)
   cloud/fake/
     fake.go                   the provider half: state machine, clock, six faults
     network.go                the network half: node records that outlive machines

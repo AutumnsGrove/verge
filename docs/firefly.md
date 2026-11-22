@@ -9,8 +9,9 @@ it through three narrow interfaces, and it is handed the current time rather tha
 
 The transition table, the lease arithmetic, the durable document with its in-memory store, the lease
 registry, both boundary interfaces including the syncer, the reconcile loop (`Tick`), and
-`Provision` are implemented in `internal/firefly`, with a fake for each outside world. The real
-Hetzner and tailnet clients and the R2 store are not.
+`Provision` are implemented in `internal/firefly`, with a fake for each outside world. A real Hetzner
+client exists and is tested against `httptest`, but has never run against the API. The tailnet client
+and the R2 store are not written.
 `docs/testing.md` names the files the remainder will become, and every new behaviour still starts as
 a failing test.
 
