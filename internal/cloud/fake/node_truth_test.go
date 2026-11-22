@@ -275,7 +275,11 @@ func TestNodeAnswersDoNotDependOnOrder(t *testing.T) {
 		name      string
 		boot      time.Duration
 		joinDelay time.Duration
-		steps     []step
+		// reap404 puts the delete on the 404 path, which reaps without a
+		// deleteAt. It is a separate scenario flag rather than a step, because
+		// the knob lives on the cloud and applies to every later delete.
+		reap404 bool
+		steps   []step
 	}{
 		{
 			name: "sad/primed_in_the_join_delay_then_deleted_before_joining",
@@ -288,9 +292,16 @@ func TestNodeAnswersDoNotDependOnOrder(t *testing.T) {
 			steps: []step{{advance: time.Minute}, {delete: true}, {advance: time.Hour}},
 		},
 		{
+			// The 404 path reaps without a deleteAt, so a cache keyed on deleteAt
+			// is blind to it. This scenario is the one that catches that shape.
 			name: "sad/primed_before_boot_then_404_reaped",
-			boot: 2 * time.Minute, joinDelay: 0,
+			boot: 2 * time.Minute, joinDelay: 0, reap404: true,
 			steps: []step{{advance: time.Second}, {delete: true}, {advance: time.Hour}},
+		},
+		{
+			name: "happy/joined_then_404_reaped",
+			boot: 0, joinDelay: 0, reap404: true,
+			steps: []step{{advance: time.Minute}, {delete: true}, {advance: time.Hour}},
 		},
 		{
 			name: "happy/primed_in_the_join_delay_then_joins",
@@ -316,6 +327,9 @@ func TestNodeAnswersDoNotDependOnOrder(t *testing.T) {
 			run := func(observe bool) (exists, joined bool) {
 				c := New(fakeBase)
 				c.Boot(sc.boot)
+				if sc.reap404 {
+					c.DeleteReturns404()
+				}
 				n := NewNetwork(c).JoinDelay(sc.joinDelay)
 
 				id, err := c.Create(ctx, spec())
