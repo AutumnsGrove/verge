@@ -7,12 +7,45 @@ or money. It answers a single question on a loop: *given the leases currently he
 machines that currently exist, what must change?* Everything else in this repository argues with
 it through three narrow interfaces, and it is handed the current time rather than looking it up.
 
-Design only. No Go yet — `docs/testing.md` names the files this will become, and the first commit
-that implements any of it is a failing test.
+The transition table and the lease arithmetic are implemented in `internal/firefly`; the reconcile
+loop, the cloud and network clients, and the state store are not. `docs/testing.md` names the files
+the remainder will become, and every new behaviour still starts as a failing test.
 
 One word on vocabulary: this document says **machine**, the product vocabulary of `README.md`.
 Where `docs/testing.md` says *instance* it means the same thing; the property names there are left
 as written rather than renamed, because renaming a property breaks the history of what it caught.
+
+## Where the name comes from
+
+The name is older than this package. Firefly was a pattern used before any of this existed: a server
+that appears when it is needed, does its work, and vanishes, described in three phases — **ignite,
+illuminate, fade** — written first for a game server and a coding runner. A specification for it
+exists in another repository, in TypeScript, built around a provider interface and an idle detector
+fed by activity signals.
+
+This is not that specification, and not a port of it. It is the same idea, redesigned and written
+fresh in Go. Every difference below is a decision rather than an unfinished step:
+
+| Then | Here | Why |
+|---|---|---|
+| idle detected from activity signals | leases with TTLs, held by whatever needs the machine | A signal that nobody is *looking* cannot tell "the agent is thinking" from "abandoned". That is the failure the previous design died of. |
+| a provider interface each consumer implements | `Cloud` and `Network`, observed facts only | An interface that hands back provider-shaped objects leaks the provider into the loop. |
+| callbacks, timers, and a background daemon | one reconcile loop over an injected clock | Nothing is delivered; everything is asked for at a time the caller controls, which is what keeps the suite fast. |
+| sync on shutdown, by convention | sync before delete, enforced by the transition table | A convention is a thing a new code path forgets. |
+| ignite / illuminate / fade | seven states | Three phases describe the happy path. The rest of the states name what goes wrong *between* them, which is where the cost is. |
+
+The three phases are still legible inside the states — `PROVISIONING` and `READY` are ignite,
+`READY` through `DRAINING` is illuminate, `SYNCING` to `ABSENT` is fade — but the phases are prose
+and the states are the mechanism.
+
+**Nothing here imports that specification, answers to it, or is obliged to stay compatible with
+it.** The earlier documents are design history in a private repository; this package is design that
+stands on its own, which is the only kind this repository carries. The lineage is worth knowing
+because the name is inherited, not because the contract is.
+
+One consequence: `internal/firefly` stays inside this repository until it has a second consumer. Its
+first shape is Verge's shape, deliberately. A module extracted before its shape is known is an API
+invented for an imaginary caller.
 
 ## The boundary
 
