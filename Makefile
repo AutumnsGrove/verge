@@ -1,18 +1,26 @@
-# The targets docs/testing.md names. Everything here is offline and fast;
-# the tiers that cost money are behind build tags and live in package dirs.
-.PHONY: all vet test race check e2e
+# The targets docs/testing.md names. The fast ones are offline; the tier that
+# needs a vulnerability database is separate, because it is the one target here
+# that cannot be run with the network switched off.
+.PHONY: all vet vuln test race check e2e
 
 all: check
 
-# The static tier. No network, no cloud, seconds.
+# The static tier, minus the vulnerability scan. No network, no cloud, seconds.
+# Requires staticcheck and gofumpt on PATH (go install honnef.co/go/tools/cmd/staticcheck@latest
+# and mvdan.cc/gofumpt@latest).
 vet:
 	go vet ./...
 	staticcheck ./...
-	govulncheck ./...
 	@out="$$(gofmt -l .)"; \
 	if [ -n "$$out" ]; then \
 		echo "gofmt needed:"; echo "$$out"; exit 1; \
 	fi
+
+# Split out from vet because it is not offline. govulncheck consults
+# vuln.go.dev on a cold database, so this target fails without a network or a
+# warm cache. docs/testing.md's "needs: nothing" applies to vet, not to this.
+vuln:
+	govulncheck ./...
 
 # The unit + integration tier: everything reachable without a cloud.
 # docs/testing.md budgets this at five seconds.
@@ -24,7 +32,8 @@ test:
 race:
 	go test -race ./...
 
-# What a pull request must pass before review.
+# What a pull request must pass before review: everything that works with the
+# network unplugged.
 check: vet race
 
 # The slow tiers. Both need real infrastructure and are skipped, loudly,
