@@ -8,10 +8,9 @@ machines that currently exist, what must change?* Everything else in this reposi
 it through three narrow interfaces, and it is handed the current time rather than looking it up.
 
 The transition table, the lease arithmetic, the durable document with its in-memory store, the lease
-registry, both boundary interfaces including the syncer, and the reconcile loop (`Tick`) are
-implemented in `internal/firefly`, with a fake for each outside world. The real Hetzner and tailnet
-clients and the R2 store are not, and nothing provisions a machine yet: `Tick` reconciles the machines
-the document already holds.
+registry, both boundary interfaces including the syncer, the reconcile loop (`Tick`), and
+`Provision` are implemented in `internal/firefly`, with a fake for each outside world. The real
+Hetzner and tailnet clients and the R2 store are not.
 `docs/testing.md` names the files the remainder will become, and every new behaviour still starts as
 a failing test.
 
@@ -599,9 +598,9 @@ layer rather than by re-reading the last one.
 
 Named so that review can point at them and say "not here":
 
-- **Provisioning.** There is no `Ensure` yet. `Tick` reconciles the machines the document holds and
-  adopts orphans the provider has; deciding that a machine *should* exist is the caller's question
-  and lands with its own method, because it needs the placement policy to answer it.
+- **Placement, and how many.** `Provision` creates one machine when the caller says it needs one.
+  Deciding *whether* it needs one, and how many sessions a machine should hold, is policy and reads
+  the snapshot. There is no `Ensure(want int)` because the count is the caller's answer.
 - **Placement.** Firefly reports live counts and each machine's deadline —
   `Snapshot(ctx, now).Machines[i]` gives `Live`, `State`, `Since`, and `Deadline` — and the caller
   picks a machine. Capacity is absent on purpose: how many sessions a machine *should* hold is

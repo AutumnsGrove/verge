@@ -80,6 +80,13 @@ type Firefly struct {
 	mu     sync.Mutex
 	doc    Document
 	loaded bool
+
+	// The failed-create record. It is not in the document because a failed create
+	// leaves nothing to record: there is no machine, and the table's row is
+	// ABSENT --CreateFailed--> ABSENT. A restart retrying immediately is fine.
+	createFailures int
+	createRetryAt  time.Time
+	createErr      error
 }
 
 // New validates the configuration and returns a firefly with no document loaded.
@@ -93,6 +100,12 @@ func New(cfg Config) (*Firefly, error) {
 		return nil, fmt.Errorf("%w: no Store", ErrConfig)
 	case cfg.Label == "":
 		return nil, fmt.Errorf("%w: no Label", ErrConfig)
+	default:
+		if _, _, ok := splitLabel(cfg.Label); !ok {
+			return nil, fmt.Errorf("%w: Label must be key=value, got %q", ErrConfig, cfg.Label)
+		}
+	}
+	switch {
 	case cfg.MaxLifetime <= 0:
 		return nil, fmt.Errorf("%w: MaxLifetime must be positive", ErrConfig)
 	case cfg.DrainWindow < 0:
