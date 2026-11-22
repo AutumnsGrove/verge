@@ -6,8 +6,8 @@
 all: check
 
 # The static tier, minus the vulnerability scan. No network, no cloud, seconds.
-# Requires staticcheck and gofumpt on PATH (go install honnef.co/go/tools/cmd/staticcheck@latest
-# and mvdan.cc/gofumpt@latest).
+# Requires staticcheck on PATH (go install honnef.co/go/tools/cmd/staticcheck@latest).
+# gofmt is the stdlib one; gofumpt is not used by this target.
 vet:
 	go vet ./...
 	staticcheck ./...
