@@ -77,10 +77,12 @@ promised to work with the network unplugged.
 install its linters, so "offline" describes what `make vet` does once the tools are present, not
 what the job does.
 
-Nothing currently *requires* any of this. `main` has no branch protection and no rulesets, so the
-workflow reports and a merge can ignore it; a pull request can go into `main` with every check red.
-Making the checks required is a repository setting rather than a workflow one, and until it is
-configured this document should not describe them as gates.
+Nothing in this workflow makes a check *required*. It reports a status; making that status a merge
+gate is a branch-protection or ruleset setting on the repository, and the setting is independent of
+the workflow — a red check is advisory unless it exists. Whether it exists is a fact about the
+repository today rather than about this design, so read `main`'s settings instead of this paragraph;
+a setting can change without a commit, and a document that pins one goes stale on a day nobody touched
+the code.
 
 ### Why contract and full are separate
 
