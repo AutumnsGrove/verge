@@ -15,10 +15,15 @@ saves its state and disappears. You pay for the hours you used, not for the mont
 
 ## Status
 
-**Nothing is built yet.** This repository is a fresh start in Go, on a different architecture
-from the version whose history precedes this commit. The earlier TypeScript/Cloudflare Code
-implementation is kept in [`legacy/grove-bloom/`](legacy/grove-bloom/) for reference only; it is
-not built, not run, and not supported.
+**Partly built, and only the pure parts.** `internal/firefly` has the transition table and the lease
+arithmetic, with tests, and nothing else exists: no reconcile loop, no cloud or network client, no
+state store. `docs/testing.md` names the files the rest will become, and `docs/firefly.md` is the
+design they implement.
+
+This repository is a fresh start in Go, on a different architecture from the version whose history
+precedes this commit. The earlier TypeScript/Cloudflare Code implementation is kept in
+[`legacy/grove-bloom/`](legacy/grove-bloom/) for reference only; it is not built, not run, and not
+supported.
 
 ## What it is
 
