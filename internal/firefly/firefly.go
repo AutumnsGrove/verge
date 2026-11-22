@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -21,6 +22,16 @@ import (
 type Config struct {
 	// Store is where the document lives. Required.
 	Store Store
+
+	// Cloud is the provider. Required.
+	Cloud Cloud
+
+	// Network is the private mesh. Required.
+	Network Network
+
+	// Syncer saves a machine's own state, and is what the ordering property is
+	// about. Required.
+	Syncer Syncer
 
 	// Label identifies this deployment's machines, as "key=value". It is how the
 	// orphan sweep tells our machines from someone else's, so a wrong label is
@@ -42,6 +53,15 @@ type Config struct {
 	// SyncAttempts is how many times a save is retried before the cap is allowed
 	// to abandon it.
 	SyncAttempts int
+
+	// TerminateDeadline is how long a delete may stay unconfirmed before the
+	// machine is an error rather than a delete in flight.
+	TerminateDeadline time.Duration
+
+	// RetryBase is the backoff for the first consecutive failure, growing
+	// linearly to RetryMax.
+	RetryBase time.Duration
+	RetryMax  time.Duration
 }
 
 // ErrConfig means the configuration cannot support a working firefly. It is
@@ -81,6 +101,18 @@ func New(cfg Config) (*Firefly, error) {
 		return nil, fmt.Errorf("%w: BootDeadline must be positive", ErrConfig)
 	case cfg.SyncAttempts < 1:
 		return nil, fmt.Errorf("%w: SyncAttempts must be at least 1", ErrConfig)
+	case cfg.Cloud == nil:
+		return nil, fmt.Errorf("%w: no Cloud", ErrConfig)
+	case cfg.Network == nil:
+		return nil, fmt.Errorf("%w: no Network", ErrConfig)
+	case cfg.Syncer == nil:
+		return nil, fmt.Errorf("%w: no Syncer", ErrConfig)
+	case cfg.TerminateDeadline <= 0:
+		return nil, fmt.Errorf("%w: TerminateDeadline must be positive", ErrConfig)
+	case cfg.RetryBase <= 0:
+		return nil, fmt.Errorf("%w: RetryBase must be positive", ErrConfig)
+	case cfg.RetryMax < cfg.RetryBase:
+		return nil, fmt.Errorf("%w: RetryMax must be at least RetryBase", ErrConfig)
 	}
 	return &Firefly{cfg: cfg}, nil
 }
@@ -100,9 +132,13 @@ func (f *Firefly) Load(ctx context.Context) error {
 
 // Lease errors that a caller has to distinguish.
 var (
-	// ErrNoSuchLease means the id is not a lease this firefly knows. It is
-	// distinct from ErrLeaseExpired because they mean different things to a
-	// caller: one is a bug, the other is a session that needs to re-acquire.
+	// ErrNoSuchLease means the id is not one this firefly ever minted, which is a
+	// bug in the caller rather than a lapse.
+	//
+	// It is distinct from ErrLeaseExpired, and the distinction survives pruning:
+	// ids are minted from a counter, so an id at or below NextLeaseNumber existed
+	// and is gone (lapsed, or released), while one above it was never issued. The
+	// id is opaque to callers; it is not opaque to the thing that minted it.
 	ErrNoSuchLease = errors.New("firefly: no such lease")
 
 	// ErrUnknownMachine means a lease was requested on a machine the document does
@@ -136,7 +172,7 @@ func (f *Firefly) Acquire(ctx context.Context, machine MachineID, holder string,
 			return fmt.Errorf("%w: %s", ErrUnknownMachine, machine)
 		}
 		doc.NextLeaseNumber++
-		id = LeaseID("lease-" + strconv.FormatUint(doc.NextLeaseNumber, 10))
+		id = LeaseID(leasePrefix + strconv.FormatUint(doc.NextLeaseNumber, 10))
 		doc.Leases = append(doc.Leases, Lease{
 			ID:      id,
 			Machine: machine,
@@ -175,6 +211,13 @@ func (f *Firefly) Renew(ctx context.Context, id LeaseID, ttl time.Duration, now 
 			doc.Leases[i] = renewed
 			return nil
 		}
+
+		// Not in the document. It may have lapsed and been pruned, which is the
+		// ordinary path a supervisor takes, or it may never have existed. The
+		// counter is what tells them apart after the record is gone.
+		if n, ok := leaseNumber(id); ok && n <= doc.NextLeaseNumber {
+			return fmt.Errorf("%w: %s", ErrLeaseExpired, id)
+		}
 		return fmt.Errorf("%w: %s", ErrNoSuchLease, id)
 	})
 }
@@ -195,6 +238,29 @@ func (f *Firefly) Release(ctx context.Context, id LeaseID) error {
 		doc.Leases = kept
 		return nil
 	})
+}
+
+// leasePrefix is the one place the id format appears. Acquire mints with it and
+// leaseNumber reads with it, so the two cannot drift into a state where every
+// pruned renewal silently reports "no such lease" instead of "expired".
+const leasePrefix = "lease-"
+
+// leaseNumber reads the counter out of an id this package minted.
+//
+// The format is internal: a caller treats the id as opaque, which is why this is
+// allowed to parse it and nothing else is. It is what keeps ErrLeaseExpired
+// meaning "it lapsed" after pruning has removed the record, instead of collapsing
+// into an error that callers are told to treat as a bug.
+func leaseNumber(id LeaseID) (uint64, bool) {
+	s := string(id)
+	if !strings.HasPrefix(s, leasePrefix) {
+		return 0, false
+	}
+	n, err := strconv.ParseUint(s[len(leasePrefix):], 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 // Snapshot is a read-only view of the machines and their live lease counts.

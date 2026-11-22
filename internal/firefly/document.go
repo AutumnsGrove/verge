@@ -38,6 +38,18 @@ type Machine struct {
 	// stored duration that ages in the background is a sleeper bug.
 	Since time.Time
 
+	// ReachedReady records that this machine was once Ready, which is what tells
+	// Syncing whether there is anything to save. A machine that never booted has
+	// nothing on it, and its sync is a successful no-op -- without that, a boot
+	// that never answers could never be destroyed.
+	ReachedReady bool
+
+	// Failures counts consecutive failures, and is cleared only by a success. It
+	// is separate from Attempt because the cap needs a number that survives a
+	// retry: a per-error attempt counter resets every time the machine is allowed
+	// to try again, which would make an exhausted-retries abandonment unreachable.
+	Failures int
+
 	// Attempt, LastErr, and RetryAt are the Error record. Attempt is zero
 	// outside Error, and RetryAt is zero until a retry is scheduled.
 	Attempt int

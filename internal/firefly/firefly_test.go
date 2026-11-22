@@ -13,12 +13,18 @@ var regBase = time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
 func testConfig(t *testing.T) Config {
 	t.Helper()
 	return Config{
-		Store:        NewMemStore(),
-		Label:        "verge=machine",
-		MaxLifetime:  4 * time.Hour,
-		DrainWindow:  15 * time.Minute,
-		BootDeadline: 10 * time.Minute,
-		SyncAttempts: 3,
+		Store:             NewMemStore(),
+		Cloud:             stubCloud{},
+		Network:           stubNetwork{},
+		Syncer:            stubSyncer{},
+		Label:             "verge=machine",
+		MaxLifetime:       4 * time.Hour,
+		DrainWindow:       15 * time.Minute,
+		BootDeadline:      10 * time.Minute,
+		SyncAttempts:      3,
+		TerminateDeadline: 5 * time.Minute,
+		RetryBase:         30 * time.Second,
+		RetryMax:          5 * time.Minute,
 	}
 }
 
@@ -634,5 +640,145 @@ func TestSnapshotReportsTheDeadline(t *testing.T) {
 	}
 	if got, want := snap.Machines[0].Deadline, regBase.Add(f.cfg.MaxLifetime); !got.Equal(want) {
 		t.Fatalf("Deadline = %s, want %s", got, want)
+	}
+}
+
+// --- stubs ---------------------------------------------------------------
+//
+// The registry tests do not exercise the provider, the mesh, or the syncer, so
+// they use the smallest thing that satisfies each interface. Tick's tests live in
+// the external test package and use the shared fake instead, because a second
+// fake would be the divergent-fake problem testing.md warns about.
+
+type stubCloud struct{}
+
+func (stubCloud) Create(context.Context, Spec) (MachineID, error) { return "", nil }
+func (stubCloud) Describe(context.Context, MachineID) (CloudMachine, error) {
+	return CloudMachine{}, nil
+}
+func (stubCloud) List(context.Context, string) ([]CloudMachine, error) { return nil, nil }
+func (stubCloud) Delete(context.Context, MachineID) error              { return nil }
+
+type stubNetwork struct{}
+
+func (stubNetwork) Joined(context.Context, MachineID) (bool, error)     { return false, nil }
+func (stubNetwork) NodeExists(context.Context, MachineID) (bool, error) { return false, nil }
+func (stubNetwork) Forget(context.Context, MachineID) error             { return nil }
+
+type stubSyncer struct{}
+
+func (stubSyncer) Sync(context.Context, MachineID) error { return nil }
+
+// TestRetryDelayIsCapped covers the curve and its ceiling directly: the cap is the
+// part that matters, because it is what stops a retry from being scheduled after
+// the machine's own deadline, where nothing could act on it.
+func TestRetryDelayIsCapped(t *testing.T) {
+	f := newFirefly(t) // RetryBase 30s, RetryMax 5m
+
+	cases := []struct {
+		name    string
+		attempt int
+		want    time.Duration
+	}{
+		{"happy/first_failure", 1, 30 * time.Second},
+		{"happy/second_failure", 2, time.Minute},
+		{"happy/below_the_ceiling", 5, 150 * time.Second},
+		{"sad/at_the_ceiling", 10, 5 * time.Minute},
+		{"sad/well_past_the_ceiling", 1000, 5 * time.Minute},
+		{"bad/zero_attempt_is_treated_as_one", 0, 30 * time.Second},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := f.retryDelay(c.attempt); got != c.want {
+				t.Fatalf("retryDelay(%d) = %s, want %s", c.attempt, got, c.want)
+			}
+		})
+	}
+}
+
+// TestRenewAfterPruningStillSaysExpired is the contract pruning nearly broke.
+//
+// Tick removes a lapsed lease, so Renew no longer finds the record and falls
+// through to the not-found path. Without a distinction there, a supervisor that
+// treats ErrNoSuchLease as a bug would alert on the ordinary lapse path.
+func TestRenewAfterPruningStillSaysExpired(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("sad/previously_minted_is_expired", func(t *testing.T) {
+		// NextLeaseNumber is 5, so lease-3 existed and is gone.
+		cfg := testConfig(t)
+		doc := Document{Version: DocumentVersion, NextLeaseNumber: 5}
+		if err := cfg.Store.Save(ctx, doc); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		g, err := New(cfg)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		if err := g.Renew(ctx, "lease-3", time.Hour, regBase); !errors.Is(err, ErrLeaseExpired) {
+			t.Fatalf("Renew(lease-3) = %v, want ErrLeaseExpired", err)
+		}
+	})
+
+	t.Run("bad/never_minted_is_no_such_lease", func(t *testing.T) {
+		cfg := testConfig(t)
+		doc := Document{Version: DocumentVersion, NextLeaseNumber: 5}
+		if err := cfg.Store.Save(ctx, doc); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		g, err := New(cfg)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		if err := g.Renew(ctx, "lease-99", time.Hour, regBase); !errors.Is(err, ErrNoSuchLease) {
+			t.Fatalf("Renew(lease-99) = %v, want ErrNoSuchLease", err)
+		}
+	})
+
+	t.Run("bad/not_even_our_format", func(t *testing.T) {
+		cfg := testConfig(t)
+		doc := Document{Version: DocumentVersion, NextLeaseNumber: 5}
+		if err := cfg.Store.Save(ctx, doc); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		g, err := New(cfg)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		if err := g.Renew(ctx, "not-a-lease", time.Hour, regBase); !errors.Is(err, ErrNoSuchLease) {
+			t.Fatalf("Renew(garbage) = %v, want ErrNoSuchLease", err)
+		}
+	})
+}
+
+// TestRenewAfterPruningThroughATick is the same contract, reached the way a
+// supervisor would reach it: acquire, let a tick prune the lapsed record, renew.
+func TestRenewAfterPruningThroughATick(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(t)
+	f, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	m := seedMachine(t, f)
+
+	id, err := f.Acquire(ctx, m, "turn:01J8", Turn, time.Minute, regBase)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	if _, err := f.Tick(ctx, regBase.Add(2*time.Minute)); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	doc, err := cfg.Store.Load(ctx)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(doc.Leases) != 0 {
+		t.Fatalf("the lapsed lease was not pruned: %d leases", len(doc.Leases))
+	}
+
+	if err := f.Renew(ctx, id, time.Hour, regBase.Add(3*time.Minute)); !errors.Is(err, ErrLeaseExpired) {
+		t.Fatalf("Renew after pruning = %v, want ErrLeaseExpired", err)
 	}
 }
