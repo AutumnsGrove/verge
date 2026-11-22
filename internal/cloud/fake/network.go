@@ -30,24 +30,20 @@ type Network struct {
 	// forgetRefuses makes the next n forgets fail before one succeeds.
 	forgetRefuses int
 
-	nodes map[firefly.MachineID]*node
+	// forgotten holds the ids whose records were removed. It is the only mutable
+	// state in this half: everything else is derived from the cloud's records.
+	forgotten map[firefly.MachineID]bool
 
 	joinedCalls int
 	existsCalls int
 	forgetCalls int
 }
 
-type node struct {
-	id        firefly.MachineID
-	joinedAt  time.Time // zero means no node ever appeared
-	forgotten bool
-}
-
 // NewNetwork returns the network half, driven by the same clock as c.
 func NewNetwork(c *Cloud) *Network {
 	return &Network{
-		cloud: c,
-		nodes: make(map[firefly.MachineID]*node),
+		cloud:     c,
+		forgotten: make(map[firefly.MachineID]bool),
 	}
 }
 
@@ -93,7 +89,7 @@ func (n *Network) Joined(ctx context.Context, id firefly.MachineID) (bool, error
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	return n.joined(id) && n.machineUsable(id), nil
+	return n.nodeExists(id) && n.machineUsable(id), nil
 }
 
 // NodeExists reports a node record, whether or not its machine is still there.
@@ -105,7 +101,7 @@ func (n *Network) NodeExists(ctx context.Context, id firefly.MachineID) (bool, e
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	return n.joined(id), nil
+	return n.nodeExists(id), nil
 }
 
 // Forget removes the node record. A node that is already gone is not an error.
@@ -121,15 +117,10 @@ func (n *Network) Forget(ctx context.Context, id firefly.MachineID) error {
 		n.forgetRefuses--
 		return fmt.Errorf("fake: the network refused the forget (%d refusals remaining)", n.forgetRefuses)
 	}
-	// The record is created if it is not there yet. Without this, forgetting a
-	// machine that has not joined does nothing, and the next NodeExists call
-	// synthesises a fresh node -- a repair that silently fails to repair.
-	rec, ok := n.nodes[id]
-	if !ok {
-		rec = &node{id: id}
-		n.nodes[id] = rec
-	}
-	rec.forgotten = true
+	// The tombstone is written whether or not a record existed yet. Without that,
+	// forgetting a machine that has not joined would do nothing, and a later
+	// NodeExists would report a node -- a repair that silently fails to repair.
+	n.forgotten[id] = true
 	return nil
 }
 
@@ -140,58 +131,46 @@ func (n *Network) Calls() (joined, exists, forgets int) {
 	return n.joinedCalls, n.existsCalls, n.forgetCalls
 }
 
-// --- internals -----------------------------------------------------------
+// --- internals ---
 //
-// Everything below is called with the cloud's lock held.
+// Everything below is called with the cloud's lock held, and nothing here
+// mutates. That is deliberate: the previous version cached a join instant on
+// first observation, which made the answer depend on when it was asked. A node
+// that exists is a historical fact about the machine's boot and delete times,
+// so it is derived fresh every time and cannot be order-dependent.
 
-// observe returns the node record for id, creating it and settling whether it
-// joined. It is the only place joinedAt is written, so the rule is in one place.
-func (n *Network) observe(id firefly.MachineID) *node {
-	rec, ok := n.nodes[id]
-	if !ok {
-		rec = &node{id: id}
-		n.nodes[id] = rec
+// joinInstant returns when this machine's node appears, and whether it ever does.
+//
+// The node appears at readyAt+joinDelay, which means it only ever exists if the
+// machine was still there at that instant: deleting before boot, or during the
+// join delay, means no agent ever ran.
+func (n *Network) joinInstant(id firefly.MachineID) (time.Time, bool) {
+	if n.metadataMissing {
+		return time.Time{}, false
 	}
-	if rec.forgotten || !rec.joinedAt.IsZero() || n.metadataMissing {
-		return rec
+	m, ok := n.cloud.mach[id]
+	if !ok || m.readyAt.IsZero() {
+		return time.Time{}, false
 	}
-
-	c := n.cloud
-	m, ok := c.mach[id]
-	if !ok {
-		return rec
+	at := m.readyAt.Add(n.joinDelay)
+	if !m.deleteAt.IsZero() && !m.deleteAt.After(at) {
+		return time.Time{}, false
 	}
-	// A machine that never finished cloud-init never runs a mesh agent.
-	if m.readyAt.IsZero() || c.now.Before(m.readyAt) {
-		return rec
-	}
-
-	// A node joins at readyAt+joinDelay, so it only ever exists if the machine was
-	// still there at that instant. Deleting before boot -- or during the join
-	// delay -- means no agent ever ran, so no record appears.
-	//
-	// Without this, a machine killed mid-boot grew a node once the clock passed
-	// its boot time, and TERMINATING was then made to Forget a node that never
-	// existed. It is the fake lying in the one direction the deletion rule cares
-	// about.
-	joinAt := m.readyAt.Add(n.joinDelay)
-	if !m.deleteAt.IsZero() && !m.deleteAt.After(joinAt) {
-		return rec
-	}
-	if c.expired(m) {
-		return rec
-	}
-	rec.joinedAt = joinAt
-	return rec
+	return at, true
 }
 
-// joined reports whether a node record exists and its join has completed.
-func (n *Network) joined(id firefly.MachineID) bool {
-	rec := n.observe(id)
-	if rec.forgotten || rec.joinedAt.IsZero() {
+// nodeExists reports whether a record is present right now: it joined, its time
+// has come, and it has not been forgotten. It says nothing about the machine,
+// which may be long gone -- that is the point of the method.
+func (n *Network) nodeExists(id firefly.MachineID) bool {
+	if n.forgotten[id] {
 		return false
 	}
-	return !n.cloud.now.Before(rec.joinedAt)
+	at, ok := n.joinInstant(id)
+	if !ok {
+		return false
+	}
+	return !n.cloud.now.Before(at)
 }
 
 // machineUsable reports whether the machine exists and is running. A node that

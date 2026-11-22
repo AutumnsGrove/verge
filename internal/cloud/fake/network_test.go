@@ -132,6 +132,83 @@ func TestDeletedBeforeBootNeverJoins(t *testing.T) {
 	})
 }
 
+// TestLingeringNodeWithoutPriming asserts the same fact as TestLingeringNode, but
+// never observes the machine while it is alive.
+//
+// The previous version cached the join instant on first observation, so this case
+// reported false for a node that had demonstrably joined. A cached answer made
+// the result depend on whether anything happened to ask earlier, which is a fake
+// lying in the one direction the deletion rule cares about: TERMINATING would see
+// no node, skip Forget, and leave the orphan record behind in production.
+func TestLingeringNodeWithoutPriming(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("sad/never_observed_while_alive", func(t *testing.T) {
+		c, n := newBoth(t)
+
+		id, err := c.Create(ctx, spec())
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		c.Advance(time.Minute) // joined; nothing has asked yet
+		if err := c.Delete(ctx, id); err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+		c.Advance(time.Hour)
+
+		if _, err := c.Describe(ctx, id); !errors.Is(err, firefly.ErrNoSuchMachine) {
+			t.Fatalf("the machine should be gone: %v", err)
+		}
+		if exists, err := n.NodeExists(ctx, id); err != nil || !exists {
+			t.Fatalf("NodeExists with no priming = %v, %v; want true, nil", exists, err)
+		}
+	})
+
+	t.Run("sad/asked_once_while_still_booting", func(t *testing.T) {
+		c := New(fakeBase).Boot(time.Minute)
+		n := NewNetwork(c)
+
+		id, err := c.Create(ctx, spec())
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		// Ask while booting: this must not settle the answer.
+		if joined, err := n.Joined(ctx, id); err != nil || joined {
+			t.Fatalf("Joined while booting = %v, %v; want false, nil", joined, err)
+		}
+
+		c.Advance(2 * time.Minute) // running, and past the join instant
+		if err := c.Delete(ctx, id); err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+		c.Advance(time.Hour)
+
+		if exists, err := n.NodeExists(ctx, id); err != nil || !exists {
+			t.Fatalf("NodeExists after polling during boot = %v, %v; want true, nil", exists, err)
+		}
+	})
+
+	t.Run("happy/forget_still_clears_it", func(t *testing.T) {
+		c, n := newBoth(t)
+		id, err := c.Create(ctx, spec())
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		c.Advance(time.Minute)
+		if err := c.Delete(ctx, id); err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+		c.Advance(time.Hour)
+
+		if err := n.Forget(ctx, id); err != nil {
+			t.Fatalf("Forget: %v", err)
+		}
+		if exists, err := n.NodeExists(ctx, id); err != nil || exists {
+			t.Fatalf("NodeExists after Forget = %v, %v; want false, nil", exists, err)
+		}
+	})
+}
+
 // TestMetadataMissing is the second half of the readiness rule: the machine runs,
 // the provider is happy, and nothing ever joins.
 func TestMetadataMissing(t *testing.T) {
