@@ -69,8 +69,13 @@ rendering, framing.
 
 `govulncheck` is deliberately not part of `make vet`. It consults the vulnerability database, so it
 is the one static check that needs a warm cache or a network, and burying it in the target that
-claims "needs: nothing" made that claim false. It is `make vuln`, it runs on every pull request in
-CI, and it is excluded from anything promised to work with the network unplugged.
+claims "needs: nothing" made that claim false. It is `make vuln`, and it is excluded from anything
+promised to work with the network unplugged.
+
+Nothing runs it automatically yet: `pi-review.yml` is the only workflow in this repository, and the
+CI table below is a plan rather than a description, exactly as the rest of this document is written
+before the code. Until there is a Go workflow, `make vuln` is a thing a human runs before a release
+rather than a thing a pull request cannot merge without.
 
 ### Why contract and full are separate
 
