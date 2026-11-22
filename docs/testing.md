@@ -72,10 +72,17 @@ is the one static check that needs a warm cache or a network, and burying it in 
 claims "needs: nothing" made that claim false. It is `make vuln`, and it is excluded from anything
 promised to work with the network unplugged.
 
-Nothing runs it automatically yet: `pi-review.yml` is the only workflow in this repository, and the
-CI table below is a plan rather than a description, exactly as the rest of this document is written
-before the code. Until there is a Go workflow, `make vuln` is a thing a human runs before a release
-rather than a thing a pull request cannot merge without.
+`make vuln` runs on every pull request: `.github/workflows/go.yml` calls it. It is the only job whose
+*check* consults the vulnerability database — the `static` job also reaches the network, but only to
+install its linters, so "offline" describes what `make vet` does once the tools are present, not
+what the job does.
+
+Nothing in this workflow makes a check *required*. It reports a status; making that status a merge
+gate is a branch-protection or ruleset setting on the repository, and the setting is independent of
+the workflow — a red check is advisory unless it exists. Whether it exists is a fact about the
+repository today rather than about this design, so read `main`'s settings instead of this paragraph;
+a setting can change without a commit, and a document that pins one goes stale on a day nobody touched
+the code.
 
 ### Why contract and full are separate
 
@@ -230,17 +237,29 @@ nothing in many places.
 
 ## CI
 
-| Trigger | Runs | Budget |
-|---|---|---|
-| pull request | vet, staticcheck, unit + integration, `-race`, fuzz seeds, all gates | < 3 min |
-| pull request (same-repo branches) | + contract tier | ~8 min |
-| nightly | 10 min per fuzz target, mutation on two packages, contract tier | ~50 min |
-| nightly | full tier (one session, one resume) | ~15 min |
-| weekly | a real `pi --mode rpc` transcript diffed against the committed golden | ~5 min |
-| `workflow_dispatch` | full tier with any tier forced | — |
+Only the first row is real. `.github/workflows/go.yml` runs the static tier, the race tier, and the
+vulnerability scan on every pull request and on `main`. Everything below it is a plan: there is no
+contract-tier job, no fuzz target to seed, no mutation gate, and no nightly schedule yet. The table
+says which is which rather than describing all of it as though it runs.
 
-Fork pull requests skip the tiers that need secrets rather than failing them. The workflow says so
-explicitly, so a red X from a fork reads as "skipped", not "broken".
+| Trigger | Runs | Budget | Status |
+|---|---|---|---|
+| pull request | vet, staticcheck, gofmt, unit + integration under `-race`, govulncheck | < 3 min | **real** |
+| pull request (same-repo branches) | + contract tier | ~8 min | plan |
+| nightly | 10 min per fuzz target, mutation on two packages, contract tier | ~50 min | plan |
+| nightly | full tier (one session, one resume) | ~15 min | plan |
+| weekly | a real `pi --mode rpc` transcript diffed against the committed golden | ~5 min | plan |
+| `workflow_dispatch` | full tier with any tier forced | — | plan |
+
+**No job needs a secret yet**, so all three run on fork pull requests with `contents: read`; there is
+nothing to skip and nothing to fail. That changes with the contract tier, which needs a Hetzner
+project and a tailnet key. When it lands it should be skipped *with a stated reason* on a fork
+rather than failed, so that a red X from a fork still reads as "skipped" and not "broken" — and
+this paragraph should be rewritten then, not left describing behaviour that has not been built.
+
+The Go workflow has no path filter: the suite is under a second, so deciding whether to run it would
+cost more than running it. Both the tools it installs are pinned, because an unpinned linter is a
+build that goes red on a day nobody changed anything.
 
 ## E2E ground rules
 

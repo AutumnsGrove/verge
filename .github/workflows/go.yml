@@ -1,0 +1,70 @@
+# The Go checks docs/testing.md promises, for the part of the tree that exists.
+#
+# Three jobs rather than one, so a red X names what broke. The static and unit
+# tiers are offline and fast; govulncheck is separate because it is the only
+# one here that needs the network, which is why it lives in its own `make`
+# target as well.
+#
+# Not here yet, and named so the absence is deliberate rather than forgotten:
+# the contract tier, the full tier, fuzz seeds, and the mutation gate. Each
+# needs either credentials or code that does not exist.
+name: go
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: go-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned, and deliberately not `@latest`: an unpinned tool is a build that
+  # can go red on a day nobody changed anything.
+  STATICCHECK_VERSION: v0.8.2
+  GOVULNCHECK_VERSION: v1.9.0
+
+jobs:
+  static:
+    name: static
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install staticcheck
+        run: go install honnef.co/go/tools/cmd/staticcheck@"${STATICCHECK_VERSION}"
+      # vet, staticcheck, and a gofmt check. Identical to what a developer runs.
+      - run: make vet
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      # The race detector is not optional here: the relay and the proxy both
+      # have concurrent readers, and retrofitting -race finds bugs late.
+      - run: make race
+
+  vuln:
+    name: vuln
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@"${GOVULNCHECK_VERSION}"
+      - run: make vuln
