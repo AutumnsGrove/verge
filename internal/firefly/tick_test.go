@@ -668,3 +668,114 @@ func TestTeardownDeleteFailureAbortsTheTick(t *testing.T) {
 		t.Fatal("a refused teardown delete did not abort the tick")
 	}
 }
+
+// TestConfirmedMachineDropsItsLeases is the wedge the review found: a machine
+// removed from the document while a lease still names it makes the document
+// invalid, so the save fails on every tick forever and the confirmation is never
+// persisted.
+func TestConfirmedMachineDropsItsLeases(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	id := h.provision(firefly.Ready)
+
+	if _, err := h.f.Acquire(ctx, id, "session:01J8", firefly.Session, 24*time.Hour, at(0)); err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+
+	// Cap straight from READY while still leased: tear down without ever draining.
+	h.tick(at(5 * time.Hour))
+	h.tick(at(5*time.Hour + time.Minute))
+
+	// Now confirm it. The tick must save, and must not leave the lease behind.
+	var confirmed firefly.Result
+	now := at(5*time.Hour + time.Minute)
+	for i := 0; i < 5; i++ {
+		now = now.Add(time.Minute)
+		confirmed = h.tick(now)
+		if len(confirmed.Confirmed) > 0 {
+			break
+		}
+	}
+	if len(confirmed.Confirmed) != 1 {
+		t.Fatalf("Confirmed = %v, want the machine", confirmed.Confirmed)
+	}
+	if !confirmed.Saved {
+		t.Fatal("the confirmation was not persisted")
+	}
+
+	doc, err := h.store.Load(ctx)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, ok := doc.Machine(id); ok {
+		t.Fatal("the machine is still in the document")
+	}
+	if len(doc.Leases) != 0 {
+		t.Fatalf("the machine left %d leases behind", len(doc.Leases))
+	}
+	if err := doc.Validate(); err != nil {
+		t.Fatalf("the saved document is invalid: %v", err)
+	}
+}
+
+// TestLapsedLeasesArePruned: a lease that lapsed without a Release should not
+// accumulate in the document, and must not block a save.
+func TestLapsedLeasesArePruned(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	id := h.provision(firefly.Ready)
+
+	if _, err := h.f.Acquire(ctx, id, "turn:01J8", firefly.Turn, time.Minute, at(0)); err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+
+	// Well past the lease's expiry, with a live lease re-acquired after.
+	h.tick(at(30 * time.Minute))
+
+	doc, err := h.store.Load(ctx)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(doc.Leases) != 0 {
+		t.Fatalf("a lapsed lease survived the tick: %d leases", len(doc.Leases))
+	}
+}
+
+// TestAbandonmentIsReachableAtTheCap is the hole the review found twice: the cap
+// used to reset the failure count, so a machine past its deadline cycled between
+// SYNCING and ERROR forever with the syncer retried every tick and no delete ever
+// issued.
+func TestAbandonmentIsReachableAtTheCap(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	id := h.provision(firefly.Ready)
+	h.sync.FailAlways()
+
+	// A lease keeps it up until the cap, then every save fails.
+	if _, err := h.f.Acquire(ctx, id, "session:01J8", firefly.Session, 24*time.Hour, at(0)); err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+
+	var abandoned firefly.Result
+	now := at(5 * time.Hour)
+	for i := 0; i < 20; i++ {
+		now = now.Add(time.Minute)
+		abandoned = h.tick(now)
+		if len(abandoned.Abandoned) > 0 {
+			break
+		}
+	}
+
+	if len(abandoned.Abandoned) != 1 || abandoned.Abandoned[0] != id {
+		t.Fatalf("Abandoned = %v, want [%s]: the cap reset the failure count", abandoned.Abandoned, id)
+	}
+
+	// And the machine actually left, rather than being abandoned on paper.
+	doc, err := h.store.Load(ctx)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if m, ok := doc.Machine(id); ok && m.State != firefly.Terminating {
+		t.Fatalf("after abandoning, the machine is %s", m.State)
+	}
+}

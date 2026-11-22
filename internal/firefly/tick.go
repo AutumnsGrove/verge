@@ -147,6 +147,30 @@ func (f *Firefly) Tick(ctx context.Context, now time.Time) (Result, error) {
 	}
 	next.Machines = kept
 
+	// --- leases -----------------------------------------------------------
+	//
+	// Two things have to be true before the document can be saved: no lease may
+	// name a machine that is not in it (Validate rejects that, and the rejection
+	// would repeat every tick forever), and lapsed leases should not accumulate.
+	// Both are handled here rather than at each site that removes something.
+	liveMachines := make(map[MachineID]struct{}, len(next.Machines))
+	for _, m := range next.Machines {
+		liveMachines[m.ID] = struct{}{}
+	}
+	keptLeases := next.Leases[:0]
+	for _, l := range next.Leases {
+		if _, ok := liveMachines[l.Machine]; !ok {
+			changed = true
+			continue
+		}
+		if !l.Live(now) {
+			changed = true
+			continue
+		}
+		keptLeases = append(keptLeases, l)
+	}
+	next.Leases = keptLeases
+
 	// --- one write -------------------------------------------------------
 	if !changed {
 		return res, nil
@@ -187,7 +211,14 @@ func (f *Firefly) step(ctx context.Context, doc *Document, m *Machine, now time.
 		m.Attempt = 0
 		m.LastErr = ""
 		m.RetryAt = time.Time{}
-		m.Failures = 0
+		// Failures is cleared by success, not by movement. The cap moves a machine
+		// into SYNCING whether or not the save has been working, so clearing it
+		// here would reset the count every time the cap fired -- making
+		// exhausted-retries abandonment unreachable, which is precisely the hole
+		// the counter was added to close.
+		if on != Capped {
+			m.Failures = 0
+		}
 		if to == Ready {
 			m.ReachedReady = true
 		}
