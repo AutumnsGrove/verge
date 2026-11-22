@@ -60,9 +60,11 @@ type machine struct {
 	createdAt time.Time
 	readyAt   time.Time // zero means never: the boot never finishes
 	deleteAt  time.Time // zero means no delete has been requested
-	goneAt    time.Time // zero means it still exists; the instant it stopped
-	gone      bool
-	publicIP  string
+	// goneAt is when the machine stopped existing; zero means it still does. It is
+	// the only record of death, because a separate flag could disagree with it --
+	// which is exactly how a 404-reaped machine grew a node record once.
+	goneAt   time.Time
+	publicIP string
 }
 
 // New returns a fake positioned at now, with a 90-second boot and a 5-second
@@ -275,10 +277,9 @@ func (c *Cloud) Delete(ctx context.Context, id firefly.MachineID) error {
 	if c.deleteReturns404 {
 		// The provider says it never had this machine, so it is gone as of now.
 		// goneAt is what lets the network half tell "reaped before it could join"
-		// from "joined and then reaped" -- a bare flag cannot express both, and
-		// this path used to set only the flag.
-		if m, ok := c.mach[id]; ok && !m.gone {
-			m.gone = true
+		// from "joined and then reaped". An instant expresses both; the flag this
+		// path used to set expressed neither.
+		if m, ok := c.mach[id]; ok && m.goneAt.IsZero() {
 			m.goneAt = c.now
 		}
 		return nil
@@ -332,17 +333,13 @@ func (c *Cloud) status(m *machine) firefly.ProviderStatus {
 	}
 }
 
-// expired reports whether the machine is gone, marking it so on the way. A
-// machine is gone once its delete has had time to complete.
+// expired reports whether the machine is gone: the instant has passed.
+//
+// It mutates nothing now that goneAt is the only record of death, which matters
+// more than it looks -- a read that also wrote was how the old flag came to
+// disagree with the timestamp.
 func (c *Cloud) expired(m *machine) bool {
-	if m.gone {
-		return true
-	}
-	if !m.goneAt.IsZero() && !c.now.Before(m.goneAt) {
-		m.gone = true
-		return true
-	}
-	return false
+	return !m.goneAt.IsZero() && !c.now.Before(m.goneAt)
 }
 
 func (m *machine) view(status firefly.ProviderStatus) firefly.CloudMachine {
