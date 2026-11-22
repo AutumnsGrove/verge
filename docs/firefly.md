@@ -7,8 +7,9 @@ or money. It answers a single question on a loop: *given the leases currently he
 machines that currently exist, what must change?* Everything else in this repository argues with
 it through three narrow interfaces, and it is handed the current time rather than looking it up.
 
-The transition table, the lease arithmetic, and the durable document with its in-memory store are
-implemented in `internal/firefly`; the reconcile loop and the cloud and network clients are not.
+The transition table, the lease arithmetic, the durable document with its in-memory store, and both
+boundary interfaces are implemented in `internal/firefly`, with a fake provider and a fake network
+sharing one clock. The reconcile loop and the real Hetzner and tailnet clients are not.
 `docs/testing.md` names the files the remainder will become, and every new behaviour still starts as
 a failing test.
 

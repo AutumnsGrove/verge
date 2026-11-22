@@ -20,6 +20,8 @@ internal/
   firefly/                    the shared mechanism
     fsm.go                    the transition table, as data
     fsm_test.go               one case per transition — enforced (see "Gates")
+    cloud.go                  the Cloud interface: provider facts, never pushed
+    network.go                the Network interface: join, node presence, forget
     lease.go
     lease_test.go             table-driven: happy/, sad/, bad/
     document.go               the durable state: machines, leases, validation
@@ -34,8 +36,10 @@ internal/
     client_test.go            against httptest
     contract_test.go          //go:build contract — real API, test project
   cloud/fake/
-    fake.go                   the one shared cloud fake: state machine, clock, six faults
+    fake.go                   the provider half: state machine, clock, six faults
+    network.go                the network half: node records that outlive machines
     fake_test.go              one case per fault, plus the lifecycle
+    network_test.go           joining, lingering nodes, forget refusals
   store/r2/
     store.go                  the state document in object storage
     store_test.go
@@ -149,8 +153,8 @@ half shares the cloud fake's clock and machine records rather than keeping its o
 machine is gone stays present until `Forget` succeeds, which is what makes `ForgetRefuses` and "a
 node that lingers on a private network" reproducible rather than theoretical.
 
-Only the cloud half exists so far; the network half is the next increment, in the same package and
-on the same clock for the reason above.
+Both halves now exist, in one package on one clock, which is what makes the lingering-node case
+expressible: the provider can forget a machine while the network still holds its record.
 
 ## The clock
 
