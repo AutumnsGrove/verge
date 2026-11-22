@@ -520,8 +520,8 @@ Three interfaces, all narrow enough to fake in the integration tier.
 ```go
 type Cloud interface {
     Create(ctx context.Context, spec Spec) (MachineID, error)
-    Describe(ctx context.Context, id MachineID) (Machine, error)
-    List(ctx context.Context, label string) ([]Machine, error)
+    Describe(ctx context.Context, id MachineID) (CloudMachine, error)
+    List(ctx context.Context, label string) ([]CloudMachine, error)
     Delete(ctx context.Context, id MachineID) error
 }
 
@@ -545,6 +545,11 @@ the transition table and one name for both would make every sentence in this fil
 `Document` is the machines plus the leases, versioned, whole-document on both read and write: a
 partial update could record a machine as terminating while its lease still holds it open, which is
 the state the ordering property exists to make impossible.
+
+`CloudMachine`, not `Machine`: the provider reports facts in its own vocabulary — `created`,
+`starting`, `running`, `stopping` — while `Machine` is the durable record of a *decision*. Returning
+`Machine` here would let the provider's word for "running" be mistaken for firefly's `READY`, which is
+the confusion the whole readiness section exists to avoid.
 
 `Spec` carries the rendered cloud-init, the image, the region, the size, and the labels. It does not
 carry a provider credential — no path through this package can put a key on a box, which is the line

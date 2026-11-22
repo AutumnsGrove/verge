@@ -131,14 +131,26 @@ describes the machine, not what is running inside it, so `Cloud.Describe` cannot
 metadata service answered; the observable consequence is a machine that is `running` and never joins,
 which is `Network.Joined`. The fake for it therefore belongs with the network, and is not built yet.
 
+`CreateIsSlow` has a limit worth stating before someone relies on it: it advances the fake's clock and
+then succeeds, so it never observes a real `context.WithTimeout` expiring. The caller-gave-up half is
+reachable by passing an already-cancelled context, which is the same path through firefly without a
+sleep. When the loop test wires a real deadline against it, the fake will take the success path and
+the test will pass for the wrong reason — so the loop's own timeout handling needs either a
+context-aware fault or a test that asserts on `ctx.Err()` directly.
+
 **Conformance.** The fake must reproduce the recorded golden event logs from the contract tier.
 When it cannot, the fake is wrong or the cloud changed, and either way a human looks.
 
-**The same fake answers for `Network`.** `Joined` is half of `READY` and `NodeExists` is half of
-deletion, so a fake that cannot hold a node record makes both untestable. It reads the same state:
-a node whose machine is `deleted` stays present until `Forget` succeeds, which is what makes
-`ForgetRefuses` and "a node that lingers on a private network" reproducible rather than
-theoretical.
+**One fake package answers for both `Cloud` and `Network`, on one clock.** `Joined` is half of
+`READY` and `NodeExists` is half of deletion, so a fake that cannot hold a node record makes both
+untestable — and two fakes with two clocks could not express "the machine is deleted but its node
+record is still there", which is the exact interleaving the deletion rule is about. So the network
+half shares the cloud fake's clock and machine records rather than keeping its own. A node whose
+machine is gone stays present until `Forget` succeeds, which is what makes `ForgetRefuses` and "a
+node that lingers on a private network" reproducible rather than theoretical.
+
+Only the cloud half exists so far; the network half is the next increment, in the same package and
+on the same clock for the reason above.
 
 ## The clock
 
