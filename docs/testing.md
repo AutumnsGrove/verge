@@ -133,7 +133,7 @@ Each fault belongs to exactly one fake, because each models a fact exactly one i
 `MetadataMissing` moved to the network column while the cloud fake was written. The provider API
 describes the machine, not what is running inside it, so `Cloud.Describe` cannot report whether the
 metadata service answered; the observable consequence is a machine that is `running` and never joins,
-which is `Network.Joined`. The fake for it therefore belongs with the network, and is not built yet.
+which is `Network.Joined`. The fake for it therefore lives with the network, and now exists there.
 
 `CreateIsSlow` has a limit worth stating before someone relies on it: it advances the fake's clock and
 then succeeds, so it never observes a real `context.WithTimeout` expiring. The caller-gave-up half is

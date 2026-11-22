@@ -165,7 +165,23 @@ func (n *Network) observe(id firefly.MachineID) *node {
 	if m.readyAt.IsZero() || c.now.Before(m.readyAt) {
 		return rec
 	}
-	rec.joinedAt = m.readyAt.Add(n.joinDelay)
+
+	// A node joins at readyAt+joinDelay, so it only ever exists if the machine was
+	// still there at that instant. Deleting before boot -- or during the join
+	// delay -- means no agent ever ran, so no record appears.
+	//
+	// Without this, a machine killed mid-boot grew a node once the clock passed
+	// its boot time, and TERMINATING was then made to Forget a node that never
+	// existed. It is the fake lying in the one direction the deletion rule cares
+	// about.
+	joinAt := m.readyAt.Add(n.joinDelay)
+	if !m.deleteAt.IsZero() && !m.deleteAt.After(joinAt) {
+		return rec
+	}
+	if c.expired(m) {
+		return rec
+	}
+	rec.joinedAt = joinAt
 	return rec
 }
 

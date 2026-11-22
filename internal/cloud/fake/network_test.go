@@ -61,6 +61,77 @@ func TestNodeJoinsAfterBoot(t *testing.T) {
 	})
 }
 
+// TestDeletedBeforeBootNeverJoins is the case the previous version got wrong: a
+// machine killed mid-boot still grew a node once the clock passed its boot time,
+// because membership was decided from readyAt alone.
+func TestDeletedBeforeBootNeverJoins(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("sad/deleted_before_boot_has_no_node", func(t *testing.T) {
+		c := New(fakeBase).Boot(2 * time.Minute)
+		n := NewNetwork(c).JoinDelay(30 * time.Second)
+
+		id, err := c.Create(ctx, spec())
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if err := c.Delete(ctx, id); err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+		c.Advance(time.Hour)
+
+		if _, err := c.Describe(ctx, id); !errors.Is(err, firefly.ErrNoSuchMachine) {
+			t.Fatalf("the machine should be gone: %v", err)
+		}
+		if exists, err := n.NodeExists(ctx, id); err != nil || exists {
+			t.Fatalf("NodeExists for a machine deleted before boot = %v, %v; want false, nil", exists, err)
+		}
+	})
+
+	t.Run("sad/deleted_during_the_join_delay_has_no_node", func(t *testing.T) {
+		c := New(fakeBase).Boot(time.Minute)
+		n := NewNetwork(c).JoinDelay(time.Minute)
+
+		id, err := c.Create(ctx, spec())
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		c.Advance(time.Minute) // running, join due in another minute
+		if err := c.Delete(ctx, id); err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+		c.Advance(time.Hour)
+
+		if exists, err := n.NodeExists(ctx, id); err != nil || exists {
+			t.Fatalf("NodeExists for a machine deleted during the join delay = %v, %v; want false, nil", exists, err)
+		}
+	})
+
+	t.Run("happy/deleted_after_it_joined_still_lingers", func(t *testing.T) {
+		c := New(fakeBase).Boot(0)
+		n := NewNetwork(c)
+
+		id, err := c.Create(ctx, spec())
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		c.Advance(time.Minute)
+		if joined, err := n.Joined(ctx, id); err != nil || !joined {
+			t.Fatalf("the machine never joined: %v, %v", joined, err)
+		}
+		if err := c.Delete(ctx, id); err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+		c.Advance(time.Hour)
+
+		// This is the lingering node the deletion rule is written for, and the fix
+		// above must not have broken it.
+		if exists, err := n.NodeExists(ctx, id); err != nil || !exists {
+			t.Fatalf("NodeExists for a machine deleted after joining = %v, %v; want true, nil", exists, err)
+		}
+	})
+}
+
 // TestMetadataMissing is the second half of the readiness rule: the machine runs,
 // the provider is happy, and nothing ever joins.
 func TestMetadataMissing(t *testing.T) {
