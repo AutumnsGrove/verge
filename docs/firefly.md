@@ -574,8 +574,11 @@ may.
 
 Named so that review can point at them and say "not here":
 
-- **Placement.** Firefly reports capacity (`Snapshot(now).Machines[i].Live`, `.Capacity`) and the
-  caller picks a machine. The policy of packing sessions onto one box is not a lifecycle question.
+- **Placement.** Firefly reports live counts and each machine's deadline —
+  `Snapshot(ctx, now).Machines[i]` gives `Live`, `State`, `Since`, and `Deadline` — and the caller
+  picks a machine. Capacity is absent on purpose: how many sessions a machine *should* hold is
+  policy, and the table above says so, so the caller compares `Live` against its own limit. The
+  policy of packing sessions onto one box is not a lifecycle question.
 - **The proxy and its ledger.** Per-session tokens, spend caps, and provider keys. Firefly never
   learns that a model exists.
 - **Repository cloning and the agent process.** Everything that happens inside `READY`.
@@ -595,7 +598,7 @@ Not decided here, recorded so the next document does not invent an answer by acc
    noticed on a bill. Guess: fifteen minutes. Measure before fixing.
 3. **Whether `Turn` leases are worth their own kind.** They may collapse into `Session` renewed by
    stream activity, and the kind list is one shorter. The reason to keep them is that
-   `Snapshot(now)` can then report "a machine with sessions but no turns" — idle, but resumable —
+   `Snapshot(ctx, now)` can then report "a machine with sessions but no turns" — idle, but resumable —
    which is exactly what the UI wants to show.
 4. **Adoption after a split brain.** Two orchestrators disagreeing about one machine resolves by
    the cloud's label and the earlier `MaxLifetime` deadline, but the tie-break deserves a `bad/`

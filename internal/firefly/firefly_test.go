@@ -386,3 +386,253 @@ func (s *rejectingStore) Save(ctx context.Context, doc Document) error {
 	}
 	return s.inner.Save(ctx, doc)
 }
+
+// TestConfigIsReported covers the accessor, which exists so a caller can log the
+// policy in force rather than guess it.
+func TestConfigIsReported(t *testing.T) {
+	f := newFirefly(t)
+	if got := f.Config().Label; got != "verge=machine" {
+		t.Fatalf("Config().Label = %q", got)
+	}
+}
+
+// TestFreshStore is the state every deployment starts in, and no other test
+// reaches it: they all seed a machine first.
+func TestFreshStore(t *testing.T) {
+	ctx := context.Background()
+	f := newFirefly(t)
+
+	t.Run("happy/snapshot_of_nothing", func(t *testing.T) {
+		snap, err := f.Snapshot(ctx, regBase)
+		if err != nil {
+			t.Fatalf("Snapshot on a fresh store: %v", err)
+		}
+		if len(snap.Machines) != 0 {
+			t.Fatalf("Snapshot returned %d machines, want 0", len(snap.Machines))
+		}
+	})
+
+	t.Run("happy/explicit_load_succeeds", func(t *testing.T) {
+		// The public Load advertises itself as the way to fail early, so it has to
+		// work before anything else has touched the store.
+		other := newFirefly(t)
+		if err := other.Load(ctx); err != nil {
+			t.Fatalf("Load on a fresh store: %v", err)
+		}
+	})
+
+	t.Run("sad/acquire_on_an_empty_document", func(t *testing.T) {
+		other := newFirefly(t)
+		_, err := other.Acquire(ctx, machineID("m1"), "session:01J8", Session, time.Hour, regBase)
+		if !errors.Is(err, ErrUnknownMachine) {
+			t.Fatalf("Acquire on a fresh store = %v, want ErrUnknownMachine", err)
+		}
+	})
+
+	t.Run("happy/release_on_an_empty_document_is_idempotent", func(t *testing.T) {
+		other := newFirefly(t)
+		if err := other.Release(ctx, "lease-1"); err != nil {
+			t.Fatalf("Release on a fresh store = %v, want nil", err)
+		}
+	})
+}
+
+// TestStoreErrorsPropagate is what justifies Snapshot and mutate returning errors
+// at all. Without these cases the propagation could be deleted and the suite would
+// stay green, which would make the signature change pointless.
+func TestStoreErrorsPropagate(t *testing.T) {
+	ctx := context.Background()
+	boom := errors.New("object storage is unreachable")
+
+	broken := func(t *testing.T) (*Firefly, MachineID) {
+		t.Helper()
+		cfg := testConfig(t)
+		cfg.Store = &brokenStore{inner: NewMemStore(), loadErr: boom}
+		f, err := New(cfg)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		return f, machineID("m1")
+	}
+
+	cases := []struct {
+		name string
+		call func(f *Firefly, m MachineID) error
+	}{
+		{"sad/load", func(f *Firefly, m MachineID) error { return f.Load(ctx) }},
+		{"sad/snapshot", func(f *Firefly, m MachineID) error { _, err := f.Snapshot(ctx, regBase); return err }},
+		{"sad/acquire", func(f *Firefly, m MachineID) error {
+			_, err := f.Acquire(ctx, m, "session:01J8", Session, time.Hour, regBase)
+			return err
+		}},
+		{"sad/renew", func(f *Firefly, m MachineID) error { return f.Renew(ctx, "lease-1", time.Hour, regBase) }},
+		{"sad/release", func(f *Firefly, m MachineID) error { return f.Release(ctx, "lease-1") }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f, m := broken(t)
+			if err := tc.call(f, m); !errors.Is(err, boom) {
+				t.Fatalf("%s = %v, want the store's error", tc.name, err)
+			}
+		})
+	}
+}
+
+// brokenStore fails loads when loadErr is set.
+type brokenStore struct {
+	inner   *MemStore
+	loadErr error
+}
+
+func (s *brokenStore) Load(ctx context.Context) (Document, error) {
+	if s.loadErr != nil {
+		return Document{}, s.loadErr
+	}
+	return s.inner.Load(ctx)
+}
+
+func (s *brokenStore) Save(ctx context.Context, doc Document) error {
+	return s.inner.Save(ctx, doc)
+}
+
+// TestRenewTouchesOnlyTheNamedLease covers the search loop's continue. Renew
+// rewrites Start and TTL, so renewing the wrong lease in a list would silently
+// extend a session nobody asked about.
+func TestRenewTouchesOnlyTheNamedLease(t *testing.T) {
+	ctx := context.Background()
+	f := newFirefly(t)
+	m := seedMachine(t, f)
+
+	// Distinct TTLs, so renewing the wrong one is visible in the expiry.
+	first, err := f.Acquire(ctx, m, "session:a", Session, 10*time.Minute, regBase)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	second, err := f.Acquire(ctx, m, "session:b", Session, time.Minute, regBase)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+
+	if err := f.Renew(ctx, second, 10*time.Minute, regBase.Add(30*time.Second)); err != nil {
+		t.Fatalf("Renew: %v", err)
+	}
+
+	doc, err := f.cfg.Store.(*MemStore).Load(ctx)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	want := map[LeaseID]time.Time{
+		first:  regBase.Add(10 * time.Minute),
+		second: regBase.Add(30*time.Second + 10*time.Minute),
+	}
+	for _, l := range doc.Leases {
+		if got := l.ExpiresAt(); !got.Equal(want[l.ID]) {
+			t.Errorf("lease %s expires at %s, want %s", l.ID, got, want[l.ID])
+		}
+	}
+	if len(doc.Leases) != 2 {
+		t.Fatalf("the document has %d leases, want 2", len(doc.Leases))
+	}
+}
+
+func TestRenewRejectsBadTTL(t *testing.T) {
+	ctx := context.Background()
+	f := newFirefly(t)
+	m := seedMachine(t, f)
+
+	id, err := f.Acquire(ctx, m, "session:a", Session, time.Hour, regBase)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+
+	t.Run("bad/zero", func(t *testing.T) {
+		if err := f.Renew(ctx, id, 0, regBase); !errors.Is(err, ErrLeaseTTL) {
+			t.Fatalf("Renew with zero ttl = %v, want ErrLeaseTTL", err)
+		}
+	})
+	t.Run("bad/negative", func(t *testing.T) {
+		if err := f.Renew(ctx, id, -time.Minute, regBase); !errors.Is(err, ErrLeaseTTL) {
+			t.Fatalf("Renew with negative ttl = %v, want ErrLeaseTTL", err)
+		}
+	})
+}
+
+// TestReleaseKeepsOtherLeases covers the branch that keeps a lease belonging to
+// another id. A Release that emptied the slice unconditionally would drop every
+// live lease on the machine and still pass a single-lease suite.
+func TestReleaseKeepsOtherLeases(t *testing.T) {
+	ctx := context.Background()
+	f := newFirefly(t)
+	m := seedMachine(t, f)
+
+	keepID, err := f.Acquire(ctx, m, "session:keep", Session, time.Hour, regBase)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	dropID, err := f.Acquire(ctx, m, "turn:drop", Turn, time.Hour, regBase)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+
+	saves := f.cfg.Store.(*MemStore).Saves()
+	if err := f.Release(ctx, dropID); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+
+	doc, err := f.cfg.Store.(*MemStore).Load(ctx)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(doc.Leases) != 1 {
+		t.Fatalf("after releasing one of two, the document has %d leases, want 1", len(doc.Leases))
+	}
+	if doc.Leases[0].ID != keepID {
+		t.Fatalf("the surviving lease is %s, want %s", doc.Leases[0].ID, keepID)
+	}
+
+	snap, err := f.Snapshot(ctx, regBase)
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if snap.Machines[0].Live != 1 {
+		t.Fatalf("Live = %d, want 1", snap.Machines[0].Live)
+	}
+
+	if got := f.cfg.Store.(*MemStore).Saves(); got != saves+1 {
+		t.Fatalf("Release wrote %d times, want exactly 1", got-saves)
+	}
+}
+
+// TestSaveRejectsAnInvalidDocument covers the validation branch of save, which is
+// the second line of defence: mutate builds documents through the API, so only a
+// programming error or a corrupt load reaches it.
+func TestSaveRejectsAnInvalidDocument(t *testing.T) {
+	ctx := context.Background()
+	f := newFirefly(t)
+
+	err := f.save(ctx, Document{Version: DocumentVersion + 1})
+	if !errors.Is(err, ErrDocumentVersion) {
+		t.Fatalf("save of a future document = %v, want ErrDocumentVersion", err)
+	}
+}
+
+// TestSnapshotReportsTheDeadline is the placement question: Live still counts
+// leases that Tick has not acted on, so a caller needs to see the cap to avoid
+// placing a session on a machine that is about to be destroyed.
+func TestSnapshotReportsTheDeadline(t *testing.T) {
+	ctx := context.Background()
+	f := newFirefly(t)
+	seedMachine(t, f)
+
+	snap, err := f.Snapshot(ctx, regBase)
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if len(snap.Machines) != 1 {
+		t.Fatalf("Snapshot returned %d machines", len(snap.Machines))
+	}
+	if got, want := snap.Machines[0].Deadline, regBase.Add(f.cfg.MaxLifetime); !got.Equal(want) {
+		t.Fatalf("Deadline = %s, want %s", got, want)
+	}
+}

@@ -212,10 +212,11 @@ func (f *Firefly) Snapshot(ctx context.Context, now time.Time) (Snapshot, error)
 	out := Snapshot{At: now}
 	for _, m := range f.doc.Machines {
 		status := MachineStatus{
-			ID:     m.ID,
-			State:  m.State,
-			Origin: m.Origin,
-			Since:  m.Since,
+			ID:       m.ID,
+			State:    m.State,
+			Origin:   m.Origin,
+			Since:    m.Since,
+			Deadline: m.Deadline,
 		}
 		for _, l := range f.doc.Leases {
 			if l.Machine == m.ID && l.Live(now) {
@@ -239,6 +240,14 @@ type MachineStatus struct {
 	State  State
 	Origin State
 	Since  time.Time
+
+	// Deadline is the hard cap, resolved at creation. It is here rather than left
+	// to the caller because placement has to be able to see that a machine is at
+	// or past its cap: Live still counts leases that Tick has not yet acted on, so
+	// without this a caller could place work on a machine that is about to be
+	// destroyed and lose a turn to a race it could have avoided.
+	Deadline time.Time
+
 	// Live is how many leases are live at the snapshot's instant. Zero means the
 	// machine is draining or about to be.
 	Live int
