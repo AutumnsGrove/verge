@@ -92,7 +92,10 @@ claims "needs: nothing" made that claim false. It is `make vuln`, and it is excl
 promised to work with the network unplugged.
 
 `make vuln` runs on every pull request: `.github/workflows/go.yml` calls it. It is the only job whose
-*check* consults the vulnerability database — the `static` job also reaches the network, but only to
+*check* consults the vulnerability database, and it caught a real one on its first run: `go.mod`
+pinned Go 1.27.3, which carries GO-2026-6859 in `net/http`, and the first client that called
+`http.Client.Do` made the path reachable. The toolchain version in `go.mod` is a dependency like any
+other, and the scan is what treats it as one — the `static` job also reaches the network, but only to
 install its linters, so "offline" describes what `make vet` does once the tools are present, not
 what the job does.
 
