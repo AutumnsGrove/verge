@@ -57,7 +57,7 @@ are behind build tags and run in CI.
 
 | Tier | Command | Needs | Budget | Covers |
 |---|---|---|---|---|
-| static | `make vet` | nothing | seconds | vet, staticcheck, gofmt, govulncheck |
+| static | `make vet` | nothing | seconds | vet, staticcheck, gofmt |
 | unit + integration | `go test ./...` | nothing | < 5 s | everything reachable without a cloud |
 | contract | `go test -tags contract ./internal/cloud/...` | a **separate** Hetzner project, R2, a tailnet key | ~6 min | a real machine boots, joins, leases, syncs, destroys |
 | full | `go test -tags e2e ./e2e` | the above plus a model provider | ~12 min | one real session, end to end, and a resume |
@@ -66,6 +66,16 @@ The middle tier is the biggest slice of the suite, and it means **integration**,
 reconcile loop, the real FSM, the real R2 client shape, against a fake cloud and a fake clock.
 Unit tests cover only what is genuinely pure — lease arithmetic, uid derivation, template
 rendering, framing.
+
+`govulncheck` is deliberately not part of `make vet`. It consults the vulnerability database, so it
+is the one static check that needs a warm cache or a network, and burying it in the target that
+claims "needs: nothing" made that claim false. It is `make vuln`, and it is excluded from anything
+promised to work with the network unplugged.
+
+Nothing runs it automatically yet: `pi-review.yml` is the only workflow in this repository, and the
+CI table below is a plan rather than a description, exactly as the rest of this document is written
+before the code. Until there is a Go workflow, `make vuln` is a thing a human runs before a release
+rather than a thing a pull request cannot merge without.
 
 ### Why contract and full are separate
 
