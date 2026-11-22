@@ -326,12 +326,18 @@ conjunctive, and each half has its own way of lying:
 
 | Symptom | Fact | Read by | Fault |
 |---|---|---|---|
-| boots, never answers | metadata never came up | `Cloud.Describe` | `MetadataMissing` |
-| answers, never joins | the network key was rejected or the join hung | `Network.Joined` | `StallBoot` |
+| never leaves `starting` | cloud-init never finished | `Cloud.Describe` | `StallBoot` |
+| running but never joins | the metadata service never came up, so the mesh agent never started | `Network.Joined` | `MetadataMissing` |
 
 Both columns matter. A guarantee that names a fact no interface can read is not a guarantee, it is
-a wish — which is why the `Network` interface in "What firefly depends on" exists at all, and why
-the second row is the one that is easiest to write and hardest to compute.
+a wish — which is why the `Network` interface in "What firefly depends on" exists at all.
+
+The second row is a correction worth keeping visible: an earlier version said `Cloud.Describe` read
+the metadata fact, and it cannot. The provider API describes the machine, not what is running inside
+it. The observable consequence of a metadata service that never answered is a machine that is
+`running` and never joins — which is exactly what `Network.Joined` can see. So the split is one fact
+per interface, and diagnosing *why* a machine never joined is a human reading its console log,
+which is a fine thing for a human to do and a poor thing to gate a state machine on.
 
 A machine that boots and never answers is *not* `ABSENT`: it exists, it is billing, and it must be
 swept.
@@ -375,7 +381,7 @@ table is the claim the pull request makes — if a row is ever wrong, one of the
 | `ForgetRefuses(n)` | `Forget` retried to a bounded count, then `ERROR(TERMINATING)`; a `sad/` case asserts both |
 | `ListDrops(id)` | presence in `List` is evidence, absence is not; only `Describe` resolves it |
 | `CreateIsSlow(d)` | a late create is adopted by the next `Tick` if the id came back, else swept as an orphan |
-| `MetadataMissing()` | `PROVISIONING --Stalled--> ERROR`; never `ABSENT`, because it bills |
+| `MetadataMissing()` | `PROVISIONING --Stalled--> ERROR`; never `ABSENT`, because it bills. Produced by the network fake, not the cloud one: it is a machine that runs and never joins |
 
 ## The reconcile loop
 

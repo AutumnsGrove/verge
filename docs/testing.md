@@ -34,7 +34,8 @@ internal/
     client_test.go            against httptest
     contract_test.go          //go:build contract — real API, test project
   cloud/fake/
-    fake.go                   the one shared fake: provider and Network
+    fake.go                   the one shared cloud fake: state machine, clock, six faults
+    fake_test.go              one case per fault, plus the lifecycle
   store/r2/
     store.go                  the state document in object storage
     store_test.go
@@ -112,16 +113,23 @@ test advances it, which is what makes the integration tier fast.
 
 **Faults.** Each is a named, composable behaviour, and each gets a sad-path test:
 
-| Fault | Models |
-|---|---|
-| `FailCreate(err)` | quota exceeded, auth expired, malformed request |
-| `StallBoot(d)` | the machine never finishes cloud-init |
-| `DeleteRefuses(n)` | a delete that fails n times then succeeds |
-| `DeleteReturns404()` | already gone — must be treated as success |
-| `ListDrops(id)` | eventual consistency: the API doesn't know about a machine that exists |
-| `CreateIsSlow(d)` | a request that returns after the caller's deadline |
-| `MetadataMissing()` | a booted machine that never answers |
-| `ForgetRefuses(n)` | the node record outlives its machine and refuses removal for n attempts |
+Each fault belongs to exactly one fake, because each models a fact exactly one interface can observe.
+
+| Fault | Fake | Models |
+|---|---|---|
+| `FailCreate(err)` | cloud | quota exceeded, auth expired, malformed request |
+| `StallBoot(d)` | cloud | the machine never finishes cloud-init |
+| `DeleteRefuses(n)` | cloud | a delete that fails n times then succeeds |
+| `DeleteReturns404()` | cloud | already gone — must be treated as success |
+| `ListDrops(id)` | cloud | eventual consistency: the API doesn't know about a machine that exists |
+| `CreateIsSlow(d)` | cloud | a request that returns after the caller's deadline |
+| `MetadataMissing()` | network | a machine that runs and never joins, because its metadata service never answered |
+| `ForgetRefuses(n)` | network | the node record outlives its machine and refuses removal for n attempts |
+
+`MetadataMissing` moved to the network column while the cloud fake was written. The provider API
+describes the machine, not what is running inside it, so `Cloud.Describe` cannot report whether the
+metadata service answered; the observable consequence is a machine that is `running` and never joins,
+which is `Network.Joined`. The fake for it therefore belongs with the network, and is not built yet.
 
 **Conformance.** The fake must reproduce the recorded golden event logs from the contract tier.
 When it cannot, the fake is wrong or the cloud changed, and either way a human looks.
