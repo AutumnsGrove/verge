@@ -8,8 +8,9 @@ machines that currently exist, what must change?* Everything else in this reposi
 it through three narrow interfaces, and it is handed the current time rather than looking it up.
 
 The transition table, the lease arithmetic, the durable document with its in-memory store, and both
-boundary interfaces are implemented in `internal/firefly`, with a fake provider and a fake network
-sharing one clock. The reconcile loop and the real Hetzner and tailnet clients are not.
+boundary interfaces and the lease registry are implemented in `internal/firefly`, with a fake
+provider and a fake network sharing one clock. The reconcile loop (`Tick`) and the real Hetzner and
+tailnet clients are not.
 `docs/testing.md` names the files the remainder will become, and every new behaviour still starts as
 a failing test.
 
@@ -86,13 +87,21 @@ type Firefly interface {
     Tick(ctx context.Context, now time.Time) (Result, error)
 
     // Leases. Acquire and Renew are the only ways to make a machine stay.
-    Acquire(holder string, kind Kind, ttl time.Duration, now time.Time) (LeaseID, error)
+    //
+    // Acquire names the machine, which the first version of this document forgot:
+    // a lease that cannot say which machine it holds open cannot be counted
+    // against one. Placement still belongs to the caller — it has already chosen
+    // the machine by the time it asks.
+    Acquire(machine MachineID, holder string, kind Kind, ttl time.Duration, now time.Time) (LeaseID, error)
     Renew(id LeaseID, ttl time.Duration, now time.Time) error
     Release(id LeaseID) error
 
-    // Snapshot is read-only and safe to call from anywhere, but it reports
-    // live counts, so it needs the clock like everything else.
-    Snapshot(now time.Time) Snapshot
+    // Snapshot is read-only and safe to call from anywhere, but it reports live
+    // counts, so it needs the clock like everything else -- and it can fail,
+    // because it may be the first call that has to read the document. A snapshot
+    // that silently returns nothing because storage is unreachable is worse than
+    // one that says so.
+    Snapshot(ctx context.Context, now time.Time) (Snapshot, error)
 
     // Destroy is the operator's override, not part of the normal path.
     Destroy(ctx context.Context, machine MachineID, reason string) error
