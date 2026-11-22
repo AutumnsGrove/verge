@@ -14,12 +14,11 @@ var fakeBase = time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
 
 func spec() firefly.Spec {
 	return firefly.Spec{
-		CloudInit:  []byte("#cloud-config\n"),
-		Image:      "ubuntu-24.04",
-		Region:     "fsn1",
-		Size:       "cx22",
-		Labels:     map[string]string{"verge": "machine"},
-		NetworkKey: "ephemeral-key",
+		CloudInit: []byte("#cloud-config\n"),
+		Image:     "ubuntu-24.04",
+		Region:    "fsn1",
+		Size:      "cx22",
+		Labels:    map[string]string{"verge": "machine"},
 	}
 }
 

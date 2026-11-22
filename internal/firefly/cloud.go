@@ -41,6 +41,11 @@ func (s ProviderStatus) Valid() bool {
 type Spec struct {
 	// CloudInit is the rendered boot script. Rendering is the caller's job,
 	// because the template is policy; firefly only carries the bytes.
+	//
+	// The network enrolment key belongs in here, not in a field of its own. An
+	// earlier version had `NetworkKey` on Spec as well, which nothing read: the
+	// caller renders the key into the script, so a second copy would be a second
+	// source of truth for a secret.
 	CloudInit []byte
 
 	Image  string
@@ -51,10 +56,11 @@ type Spec struct {
 	// how the orphan sweep tells its machines from someone else's.
 	Labels map[string]string
 
-	// NetworkKey enrols the machine in the private network. Ephemeral: the node
-	// record disappears when the machine disconnects, which is what makes the
-	// network half of deletion usually resolve itself.
-	NetworkKey string
+	// Name is the provider's name for the machine, if the caller wants one. Empty
+	// means "generate something unique", because the API requires names to be
+	// unique within a project and a constant one silently limits a project to a
+	// single machine. Firefly never reads the name back: identity is the id.
+	Name string
 }
 
 // CloudMachine is the provider's view of a machine.
