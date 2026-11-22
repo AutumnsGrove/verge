@@ -156,12 +156,21 @@ golden one.
 
 | Property | Statement |
 |---|---|
-| ordering | over any generated event log, a `DELETE` for an instance is preceded by a successful sync for it |
+| ordering | over any generated event log, a `DELETE` for an instance is preceded by a successful sync for it, or by a recorded abandonment (below) |
 | idempotence | `Tick` twice with a frozen clock produces at most one transition |
 | monotonicity | adding a lease never makes an instance fade sooner |
 | monotonic clock | `Live(instance)` never grows as the clock advances with no renewal |
 | lease expiry | a lease with TTL t is live for exactly `[start, start+t)` |
 | release | `Release` is idempotent; a second release is not an error |
+
+**The ordering property has one stated exception, and the generator says so.** A machine whose sync
+cannot succeed would bill forever if the hard cap also refused to abandon the save, so at
+`MaxLifetime` it takes `--Abandoned-->` and is deleted: the loss is logged and counted, and the
+counter's steady state is zero (`docs/firefly.md`, "Where the ordering property yields").
+`order_test.go` therefore excludes the permanent-sync-failure fault from the ordering generator,
+except in the one `sad/` case that asserts the abandonment, and that case claims the counter is
+exactly one. The property is strict everywhere else — a `DELETE` with no sync and no recorded
+abandonment is a failure in every generated history.
 
 ## Strict test-first
 
