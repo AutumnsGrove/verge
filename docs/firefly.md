@@ -326,12 +326,18 @@ conjunctive, and each half has its own way of lying:
 
 | Symptom | Fact | Read by | Fault |
 |---|---|---|---|
-| boots, never answers | metadata never came up | `Cloud.Describe` | `MetadataMissing` |
-| answers, never joins | the network key was rejected or the join hung | `Network.Joined` | `StallBoot` |
+| never leaves `starting` | cloud-init never finished | `Cloud.Describe` | `StallBoot` |
+| running but never joins | the metadata service never came up, so the mesh agent never started | `Network.Joined` | `MetadataMissing` |
 
 Both columns matter. A guarantee that names a fact no interface can read is not a guarantee, it is
-a wish — which is why the `Network` interface in "What firefly depends on" exists at all, and why
-the second row is the one that is easiest to write and hardest to compute.
+a wish — which is why the `Network` interface in "What firefly depends on" exists at all.
+
+The second row is a correction worth keeping visible: an earlier version said `Cloud.Describe` read
+the metadata fact, and it cannot. The provider API describes the machine, not what is running inside
+it. The observable consequence of a metadata service that never answered is a machine that is
+`running` and never joins — which is exactly what `Network.Joined` can see. So the split is one fact
+per interface, and diagnosing *why* a machine never joined is a human reading its console log,
+which is a fine thing for a human to do and a poor thing to gate a state machine on.
 
 A machine that boots and never answers is *not* `ABSENT`: it exists, it is billing, and it must be
 swept.
@@ -375,7 +381,7 @@ table is the claim the pull request makes — if a row is ever wrong, one of the
 | `ForgetRefuses(n)` | `Forget` retried to a bounded count, then `ERROR(TERMINATING)`; a `sad/` case asserts both |
 | `ListDrops(id)` | presence in `List` is evidence, absence is not; only `Describe` resolves it |
 | `CreateIsSlow(d)` | a late create is adopted by the next `Tick` if the id came back, else swept as an orphan |
-| `MetadataMissing()` | `PROVISIONING --Stalled--> ERROR`; never `ABSENT`, because it bills |
+| `MetadataMissing()` | `PROVISIONING --Stalled--> ERROR`; never `ABSENT`, because it bills. Produced by the network fake, not the cloud one: it is a machine that runs and never joins |
 
 ## The reconcile loop
 
@@ -514,8 +520,8 @@ Three interfaces, all narrow enough to fake in the integration tier.
 ```go
 type Cloud interface {
     Create(ctx context.Context, spec Spec) (MachineID, error)
-    Describe(ctx context.Context, id MachineID) (Machine, error)
-    List(ctx context.Context, label string) ([]Machine, error)
+    Describe(ctx context.Context, id MachineID) (CloudMachine, error)
+    List(ctx context.Context, label string) ([]CloudMachine, error)
     Delete(ctx context.Context, id MachineID) error
 }
 
@@ -539,6 +545,11 @@ the transition table and one name for both would make every sentence in this fil
 `Document` is the machines plus the leases, versioned, whole-document on both read and write: a
 partial update could record a machine as terminating while its lease still holds it open, which is
 the state the ordering property exists to make impossible.
+
+`CloudMachine`, not `Machine`: the provider reports facts in its own vocabulary — `created`,
+`starting`, `running`, `stopping` — while `Machine` is the durable record of a *decision*. Returning
+`Machine` here would let the provider's word for "running" be mistaken for firefly's `READY`, which is
+the confusion the whole readiness section exists to avoid.
 
 `Spec` carries the rendered cloud-init, the image, the region, the size, and the labels. It does not
 carry a provider credential — no path through this package can put a key on a box, which is the line

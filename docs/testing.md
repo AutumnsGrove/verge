@@ -34,7 +34,8 @@ internal/
     client_test.go            against httptest
     contract_test.go          //go:build contract — real API, test project
   cloud/fake/
-    fake.go                   the one shared fake: provider and Network
+    fake.go                   the one shared cloud fake: state machine, clock, six faults
+    fake_test.go              one case per fault, plus the lifecycle
   store/r2/
     store.go                  the state document in object storage
     store_test.go
@@ -112,25 +113,44 @@ test advances it, which is what makes the integration tier fast.
 
 **Faults.** Each is a named, composable behaviour, and each gets a sad-path test:
 
-| Fault | Models |
-|---|---|
-| `FailCreate(err)` | quota exceeded, auth expired, malformed request |
-| `StallBoot(d)` | the machine never finishes cloud-init |
-| `DeleteRefuses(n)` | a delete that fails n times then succeeds |
-| `DeleteReturns404()` | already gone — must be treated as success |
-| `ListDrops(id)` | eventual consistency: the API doesn't know about a machine that exists |
-| `CreateIsSlow(d)` | a request that returns after the caller's deadline |
-| `MetadataMissing()` | a booted machine that never answers |
-| `ForgetRefuses(n)` | the node record outlives its machine and refuses removal for n attempts |
+Each fault belongs to exactly one fake, because each models a fact exactly one interface can observe.
+
+| Fault | Fake | Models |
+|---|---|---|
+| `FailCreate(err)` | cloud | quota exceeded, auth expired, malformed request |
+| `StallBoot(d)` | cloud | the machine never finishes cloud-init |
+| `DeleteRefuses(n)` | cloud | a delete that fails n times then succeeds |
+| `DeleteReturns404()` | cloud | already gone — must be treated as success |
+| `ListDrops(id)` | cloud | eventual consistency: the API doesn't know about a machine that exists |
+| `CreateIsSlow(d)` | cloud | a request that returns after the caller's deadline |
+| `MetadataMissing()` | network | a machine that runs and never joins, because its metadata service never answered |
+| `ForgetRefuses(n)` | network | the node record outlives its machine and refuses removal for n attempts |
+
+`MetadataMissing` moved to the network column while the cloud fake was written. The provider API
+describes the machine, not what is running inside it, so `Cloud.Describe` cannot report whether the
+metadata service answered; the observable consequence is a machine that is `running` and never joins,
+which is `Network.Joined`. The fake for it therefore belongs with the network, and is not built yet.
+
+`CreateIsSlow` has a limit worth stating before someone relies on it: it advances the fake's clock and
+then succeeds, so it never observes a real `context.WithTimeout` expiring. The caller-gave-up half is
+reachable by passing an already-cancelled context, which is the same path through firefly without a
+sleep. When the loop test wires a real deadline against it, the fake will take the success path and
+the test will pass for the wrong reason — so the loop's own timeout handling needs either a
+context-aware fault or a test that asserts on `ctx.Err()` directly.
 
 **Conformance.** The fake must reproduce the recorded golden event logs from the contract tier.
 When it cannot, the fake is wrong or the cloud changed, and either way a human looks.
 
-**The same fake answers for `Network`.** `Joined` is half of `READY` and `NodeExists` is half of
-deletion, so a fake that cannot hold a node record makes both untestable. It reads the same state:
-a node whose machine is `deleted` stays present until `Forget` succeeds, which is what makes
-`ForgetRefuses` and "a node that lingers on a private network" reproducible rather than
-theoretical.
+**One fake package answers for both `Cloud` and `Network`, on one clock.** `Joined` is half of
+`READY` and `NodeExists` is half of deletion, so a fake that cannot hold a node record makes both
+untestable — and two fakes with two clocks could not express "the machine is deleted but its node
+record is still there", which is the exact interleaving the deletion rule is about. So the network
+half shares the cloud fake's clock and machine records rather than keeping its own. A node whose
+machine is gone stays present until `Forget` succeeds, which is what makes `ForgetRefuses` and "a
+node that lingers on a private network" reproducible rather than theoretical.
+
+Only the cloud half exists so far; the network half is the next increment, in the same package and
+on the same clock for the reason above.
 
 ## The clock
 
