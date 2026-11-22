@@ -601,9 +601,20 @@ requires one, and it is the one identifier a network can be asked about. So
 `Provision` generates it when the caller does not supply one, `Machine` records it,
 and `Cloud` keeps using the provider id.
 
-The alternative — having the machine write its own provider id into a tag at boot
-— cannot work: the id is only known after `Create`, and the tag has to be in the
-cloud-init rendered before it.
+The alternative is viable, and the reason to reject it is not the one that first
+looked obvious. A machine can read its own provider id from
+`169.254.169.254/hetzner/v1/metadata/instance-id` after it boots — the same
+metadata service the readiness section relies on — and name itself from that, so
+the id does not have to be known before `Create`.
+
+It is rejected because it makes identity depend on a script running on the machine.
+A bootstrap that half-fails can still join the mesh, and would then appear under
+whatever name it fell back to, which is a node nobody can match to a machine and a
+`TERMINATING` machine whose node is never forgotten. The provider sets the server's
+hostname at creation and a node takes that hostname without asking the machine
+anything, so keying on the name needs no boot-time cooperation at all — and
+survives the bootstrap that failed, which is exactly the machine most likely to
+need forgetting.
 
 **Not built yet.** The interface above is the shape to implement; the code in
 `internal/firefly/network.go` still takes `MachineID`, and the tailnet client that
