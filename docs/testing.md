@@ -72,10 +72,8 @@ is the one static check that needs a warm cache or a network, and burying it in 
 claims "needs: nothing" made that claim false. It is `make vuln`, and it is excluded from anything
 promised to work with the network unplugged.
 
-Nothing runs it automatically yet: `pi-review.yml` is the only workflow in this repository, and the
-CI table below is a plan rather than a description, exactly as the rest of this document is written
-before the code. Until there is a Go workflow, `make vuln` is a thing a human runs before a release
-rather than a thing a pull request cannot merge without.
+`make vuln` runs on every pull request: `.github/workflows/go.yml` calls it, and it is the only job
+in that workflow which needs a network. A pull request cannot merge without it passing.
 
 ### Why contract and full are separate
 
@@ -244,8 +242,11 @@ says which is which rather than describing all of it as though it runs.
 | weekly | a real `pi --mode rpc` transcript diffed against the committed golden | ~5 min | plan |
 | `workflow_dispatch` | full tier with any tier forced | — | plan |
 
-Fork pull requests skip the tiers that need secrets rather than failing them. The workflow says so
-explicitly, so a red X from a fork reads as "skipped", not "broken".
+**No job needs a secret yet**, so all three run on fork pull requests with `contents: read`; there is
+nothing to skip and nothing to fail. That changes with the contract tier, which needs a Hetzner
+project and a tailnet key. When it lands it should be skipped *with a stated reason* on a fork
+rather than failed, so that a red X from a fork still reads as "skipped" and not "broken" — and
+this paragraph should be rewritten then, not left describing behaviour that has not been built.
 
 The Go workflow has no path filter: the suite is under a second, so deciding whether to run it would
 cost more than running it. Both the tools it installs are pinned, because an unpinned linter is a
