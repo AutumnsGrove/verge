@@ -230,17 +230,26 @@ nothing in many places.
 
 ## CI
 
-| Trigger | Runs | Budget |
-|---|---|---|
-| pull request | vet, staticcheck, unit + integration, `-race`, fuzz seeds, all gates | < 3 min |
-| pull request (same-repo branches) | + contract tier | ~8 min |
-| nightly | 10 min per fuzz target, mutation on two packages, contract tier | ~50 min |
-| nightly | full tier (one session, one resume) | ~15 min |
-| weekly | a real `pi --mode rpc` transcript diffed against the committed golden | ~5 min |
-| `workflow_dispatch` | full tier with any tier forced | — |
+Only the first row is real. `.github/workflows/go.yml` runs the static tier, the race tier, and the
+vulnerability scan on every pull request and on `main`. Everything below it is a plan: there is no
+contract-tier job, no fuzz target to seed, no mutation gate, and no nightly schedule yet. The table
+says which is which rather than describing all of it as though it runs.
+
+| Trigger | Runs | Budget | Status |
+|---|---|---|---|
+| pull request | vet, staticcheck, gofmt, unit + integration under `-race`, govulncheck | < 3 min | **real** |
+| pull request (same-repo branches) | + contract tier | ~8 min | plan |
+| nightly | 10 min per fuzz target, mutation on two packages, contract tier | ~50 min | plan |
+| nightly | full tier (one session, one resume) | ~15 min | plan |
+| weekly | a real `pi --mode rpc` transcript diffed against the committed golden | ~5 min | plan |
+| `workflow_dispatch` | full tier with any tier forced | — | plan |
 
 Fork pull requests skip the tiers that need secrets rather than failing them. The workflow says so
 explicitly, so a red X from a fork reads as "skipped", not "broken".
+
+The Go workflow has no path filter: the suite is under a second, so deciding whether to run it would
+cost more than running it. Both the tools it installs are pinned, because an unpinned linter is a
+build that goes red on a day nobody changed anything.
 
 ## E2E ground rules
 
