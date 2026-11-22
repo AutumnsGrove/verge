@@ -16,9 +16,10 @@ saves its state and disappears. You pay for the hours you used, not for the mont
 ## Status
 
 **Partly built, and only the offline parts.** `internal/firefly` has the transition table, the lease
-arithmetic, the durable state document with an in-memory store, the lease registry, and both
-boundary interfaces — the provider and the private network — with a fake for each. Nothing leaves the process: there is no
-reconcile loop, no real Hetzner client, no real tailnet client, and no object storage.
+arithmetic, the durable state document with an in-memory store, the lease registry, the reconcile
+loop, and all three boundary interfaces — provider, private network, and state sync — each with a
+fake. Nothing leaves the process: there is no Hetzner client, no tailnet client, no object storage,
+and nothing yet provisions a machine.
 `docs/testing.md` names the files the rest will become, and `docs/firefly.md` is the design they
 implement.
 

@@ -40,6 +40,7 @@ type Cloud struct {
 	// Faults. Each is a named behaviour from docs/testing.md and each has at
 	// least one sad/ case that asserts what firefly does about it.
 	failCreate       error
+	failList         error
 	stallBoot        bool
 	createIsSlow     time.Duration
 	deleteRefuses    int
@@ -125,6 +126,15 @@ func (c *Cloud) FailCreate(err error) *Cloud {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.failCreate = err
+	return c
+}
+
+// FailList makes every listing fail, which is how a tick meets an unreachable
+// provider rather than an empty one.
+func (c *Cloud) FailList(err error) *Cloud {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.failList = err
 	return c
 }
 
@@ -242,6 +252,9 @@ func (c *Cloud) List(ctx context.Context, label string) ([]firefly.CloudMachine,
 
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if c.failList != nil {
+		return nil, c.failList
 	}
 
 	var out []firefly.CloudMachine

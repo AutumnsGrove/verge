@@ -29,6 +29,9 @@ internal/
     store.go                  the Store interface and an in-memory implementation
     store_test.go             round-trip, rejected writes, copy isolation, race
     firefly.go                the mechanism: config, leases, snapshot
+    tick.go                   the reconcile loop, the orphan sweep, Result
+    tick_test.go              the whole lifecycle against the shared fakes
+    sync.go                   the Syncer boundary: saving the machine's own state
     firefly_test.go           the registry, id continuity, failed saves
     order_test.go             the sync-before-delete invariant
     testdata/golden/          recorded event logs, replayed by the fake
@@ -39,8 +42,10 @@ internal/
   cloud/fake/
     fake.go                   the provider half: state machine, clock, six faults
     network.go                the network half: node records that outlive machines
+    sync.go                   the syncer: records calls, fails on demand
     fake_test.go              one case per fault, plus the lifecycle
     network_test.go           joining, lingering nodes, forget refusals
+    node_truth_test.go        NodeExists as a truth table, and order-independence
   store/r2/
     store.go                  the state document in object storage
     store_test.go

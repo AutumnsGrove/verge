@@ -7,10 +7,11 @@ or money. It answers a single question on a loop: *given the leases currently he
 machines that currently exist, what must change?* Everything else in this repository argues with
 it through three narrow interfaces, and it is handed the current time rather than looking it up.
 
-The transition table, the lease arithmetic, the durable document with its in-memory store, and both
-boundary interfaces and the lease registry are implemented in `internal/firefly`, with a fake
-provider and a fake network sharing one clock. The reconcile loop (`Tick`) and the real Hetzner and
-tailnet clients are not.
+The transition table, the lease arithmetic, the durable document with its in-memory store, the lease
+registry, both boundary interfaces including the syncer, and the reconcile loop (`Tick`) are
+implemented in `internal/firefly`, with a fake for each outside world. The real Hetzner and tailnet
+clients and the R2 store are not, and nothing provisions a machine yet: `Tick` reconciles the machines
+the document already holds.
 `docs/testing.md` names the files the remainder will become, and every new behaviour still starts as
 a failing test.
 
@@ -538,6 +539,13 @@ type Cloud interface {
 // Network makes both two-fact rules computable. Joined and NodeExists
 // observe; Forget repairs, because observation alone can detect a lingering
 // node forever without ever resolving it.
+// Syncer saves a machine's own state -- the session, the workspace, the
+// uncommitted patch. Not the document: that is Store, and losing it costs a
+// reconcile rather than an afternoon.
+type Syncer interface {
+    Sync(ctx context.Context, id MachineID) error
+}
+
 type Network interface {
     Joined(ctx context.Context, id MachineID) (bool, error)
     NodeExists(ctx context.Context, id MachineID) (bool, error)
@@ -570,10 +578,26 @@ usually resolves itself. That distinction is the same one the whole design rests
 that can spend money never reaches the runner; a credential that can only join a private network
 may.
 
+### The dependency that was missing
+
+`Cloud`, `Network`, and `Store` were all specified before any code existed, and the ordering property
+— nothing is deleted before its state is saved — was specified with them. Writing the loop found that
+the save itself had no method: `Store` is firefly's own bookkeeping, and nothing could reach the
+machine to save the work. A guarantee whose work has no method is a guarantee about nothing, which is
+why `Syncer` is now a required dependency and a missing one fails `New` rather than being discovered
+on the first teardown.
+
+The same shape as the missing `Machine` field on `Lease` and the missing machine argument on
+`Acquire`: three gaps, all invisible in prose and immediate in code, all found by building the next
+layer rather than by re-reading the last one.
+
 ## What firefly does not own
 
 Named so that review can point at them and say "not here":
 
+- **Provisioning.** There is no `Ensure` yet. `Tick` reconciles the machines the document holds and
+  adopts orphans the provider has; deciding that a machine *should* exist is the caller's question
+  and lands with its own method, because it needs the placement policy to answer it.
 - **Placement.** Firefly reports live counts and each machine's deadline —
   `Snapshot(ctx, now).Machines[i]` gives `Live`, `State`, `Since`, and `Deadline` — and the caller
   picks a machine. Capacity is absent on purpose: how many sessions a machine *should* hold is

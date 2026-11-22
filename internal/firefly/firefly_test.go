@@ -13,12 +13,18 @@ var regBase = time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
 func testConfig(t *testing.T) Config {
 	t.Helper()
 	return Config{
-		Store:        NewMemStore(),
-		Label:        "verge=machine",
-		MaxLifetime:  4 * time.Hour,
-		DrainWindow:  15 * time.Minute,
-		BootDeadline: 10 * time.Minute,
-		SyncAttempts: 3,
+		Store:             NewMemStore(),
+		Cloud:             stubCloud{},
+		Network:           stubNetwork{},
+		Syncer:            stubSyncer{},
+		Label:             "verge=machine",
+		MaxLifetime:       4 * time.Hour,
+		DrainWindow:       15 * time.Minute,
+		BootDeadline:      10 * time.Minute,
+		SyncAttempts:      3,
+		TerminateDeadline: 5 * time.Minute,
+		RetryBase:         30 * time.Second,
+		RetryMax:          5 * time.Minute,
 	}
 }
 
@@ -634,5 +640,58 @@ func TestSnapshotReportsTheDeadline(t *testing.T) {
 	}
 	if got, want := snap.Machines[0].Deadline, regBase.Add(f.cfg.MaxLifetime); !got.Equal(want) {
 		t.Fatalf("Deadline = %s, want %s", got, want)
+	}
+}
+
+// --- stubs ---------------------------------------------------------------
+//
+// The registry tests do not exercise the provider, the mesh, or the syncer, so
+// they use the smallest thing that satisfies each interface. Tick's tests live in
+// the external test package and use the shared fake instead, because a second
+// fake would be the divergent-fake problem testing.md warns about.
+
+type stubCloud struct{}
+
+func (stubCloud) Create(context.Context, Spec) (MachineID, error) { return "", nil }
+func (stubCloud) Describe(context.Context, MachineID) (CloudMachine, error) {
+	return CloudMachine{}, nil
+}
+func (stubCloud) List(context.Context, string) ([]CloudMachine, error) { return nil, nil }
+func (stubCloud) Delete(context.Context, MachineID) error              { return nil }
+
+type stubNetwork struct{}
+
+func (stubNetwork) Joined(context.Context, MachineID) (bool, error)     { return false, nil }
+func (stubNetwork) NodeExists(context.Context, MachineID) (bool, error) { return false, nil }
+func (stubNetwork) Forget(context.Context, MachineID) error             { return nil }
+
+type stubSyncer struct{}
+
+func (stubSyncer) Sync(context.Context, MachineID) error { return nil }
+
+// TestRetryDelayIsCapped covers the curve and its ceiling directly: the cap is the
+// part that matters, because it is what stops a retry from being scheduled after
+// the machine's own deadline, where nothing could act on it.
+func TestRetryDelayIsCapped(t *testing.T) {
+	f := newFirefly(t) // RetryBase 30s, RetryMax 5m
+
+	cases := []struct {
+		name    string
+		attempt int
+		want    time.Duration
+	}{
+		{"happy/first_failure", 1, 30 * time.Second},
+		{"happy/second_failure", 2, time.Minute},
+		{"happy/below_the_ceiling", 5, 150 * time.Second},
+		{"sad/at_the_ceiling", 10, 5 * time.Minute},
+		{"sad/well_past_the_ceiling", 1000, 5 * time.Minute},
+		{"bad/zero_attempt_is_treated_as_one", 0, 30 * time.Second},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := f.retryDelay(c.attempt); got != c.want {
+				t.Fatalf("retryDelay(%d) = %s, want %s", c.attempt, got, c.want)
+			}
+		})
 	}
 }

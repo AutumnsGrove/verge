@@ -22,6 +22,16 @@ type Config struct {
 	// Store is where the document lives. Required.
 	Store Store
 
+	// Cloud is the provider. Required.
+	Cloud Cloud
+
+	// Network is the private mesh. Required.
+	Network Network
+
+	// Syncer saves a machine's own state, and is what the ordering property is
+	// about. Required.
+	Syncer Syncer
+
 	// Label identifies this deployment's machines, as "key=value". It is how the
 	// orphan sweep tells our machines from someone else's, so a wrong label is
 	// how a design adopts a machine it did not create and then deletes it.
@@ -42,6 +52,15 @@ type Config struct {
 	// SyncAttempts is how many times a save is retried before the cap is allowed
 	// to abandon it.
 	SyncAttempts int
+
+	// TerminateDeadline is how long a delete may stay unconfirmed before the
+	// machine is an error rather than a delete in flight.
+	TerminateDeadline time.Duration
+
+	// RetryBase is the backoff for the first consecutive failure, growing
+	// linearly to RetryMax.
+	RetryBase time.Duration
+	RetryMax  time.Duration
 }
 
 // ErrConfig means the configuration cannot support a working firefly. It is
@@ -81,6 +100,18 @@ func New(cfg Config) (*Firefly, error) {
 		return nil, fmt.Errorf("%w: BootDeadline must be positive", ErrConfig)
 	case cfg.SyncAttempts < 1:
 		return nil, fmt.Errorf("%w: SyncAttempts must be at least 1", ErrConfig)
+	case cfg.Cloud == nil:
+		return nil, fmt.Errorf("%w: no Cloud", ErrConfig)
+	case cfg.Network == nil:
+		return nil, fmt.Errorf("%w: no Network", ErrConfig)
+	case cfg.Syncer == nil:
+		return nil, fmt.Errorf("%w: no Syncer", ErrConfig)
+	case cfg.TerminateDeadline <= 0:
+		return nil, fmt.Errorf("%w: TerminateDeadline must be positive", ErrConfig)
+	case cfg.RetryBase <= 0:
+		return nil, fmt.Errorf("%w: RetryBase must be positive", ErrConfig)
+	case cfg.RetryMax < cfg.RetryBase:
+		return nil, fmt.Errorf("%w: RetryMax must be at least RetryBase", ErrConfig)
 	}
 	return &Firefly{cfg: cfg}, nil
 }
