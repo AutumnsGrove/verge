@@ -29,7 +29,7 @@ fresh in Go. Every difference below is a decision rather than an unfinished step
 | Then | Here | Why |
 |---|---|---|
 | idle detected from activity signals | leases with TTLs, held by whatever needs the machine | A signal that nobody is *looking* cannot tell "the agent is thinking" from "abandoned". That is the failure the previous design died of. |
-| a provider interface each consumer implements | `Cloud` and `Network`, observed facts only | An interface that hands back provider-shaped objects leaks the provider into the loop. |
+| a provider interface each consumer implements | `Cloud` and `Network`, queried rather than pushed | A provider that calls back into the loop owns part of the loop's timing. Asking is testable; being told is not. |
 | callbacks, timers, and a background daemon | one reconcile loop over an injected clock | Nothing is delivered; everything is asked for at a time the caller controls, which is what keeps the suite fast. |
 | sync on shutdown, by convention | sync before delete, enforced by the transition table | A convention is a thing a new code path forgets. |
 | ignite / illuminate / fade | seven states | Three phases describe the happy path. The rest of the states name what goes wrong *between* them, which is where the cost is. |
@@ -39,9 +39,9 @@ The three phases are still legible inside the states — `PROVISIONING` and `REA
 and the states are the mechanism.
 
 **Nothing here imports that specification, answers to it, or is obliged to stay compatible with
-it.** The earlier documents are design history in a private repository; this package is design that
-stands on its own, which is the only kind this repository carries. The lineage is worth knowing
-because the name is inherited, not because the contract is.
+it.** That specification, and the plan around it, are design history in a private repository; this
+package is design that stands on its own, which is the only kind this repository carries. The
+lineage is worth knowing because the name is inherited, not because the contract is.
 
 One consequence: `internal/firefly` stays inside this repository until it has a second consumer. Its
 first shape is Verge's shape, deliberately. A module extracted before its shape is known is an API
