@@ -29,6 +29,11 @@ internal/
     client.go                 the real client
     client_test.go            against httptest
     contract_test.go          //go:build contract — real API, test project
+  cloud/fake/
+    fake.go                   the one shared fake: provider and Network
+  net/tailnet/
+    client.go                 the real Network: join, observe, forget
+    client_test.go
   rpc/relay/
     relay.go                  the pi JSONL reader
     relay_test.go
@@ -92,9 +97,16 @@ test advances it, which is what makes the integration tier fast.
 | `ListDrops(id)` | eventual consistency: the API doesn't know about a machine that exists |
 | `CreateIsSlow(d)` | a request that returns after the caller's deadline |
 | `MetadataMissing()` | a booted machine that never answers |
+| `ForgetRefuses(n)` | the node record outlives its machine and refuses removal for n attempts |
 
 **Conformance.** The fake must reproduce the recorded golden event logs from the contract tier.
 When it cannot, the fake is wrong or the cloud changed, and either way a human looks.
+
+**The same fake answers for `Network`.** `Joined` is half of `READY` and `NodeExists` is half of
+deletion, so a fake that cannot hold a node record makes both untestable. It reads the same state:
+a node whose machine is `deleted` stays present until `Forget` succeeds, which is what makes
+`ForgetRefuses` and "a node that lingers on a private network" reproducible rather than
+theoretical.
 
 ## The clock
 
@@ -110,7 +122,8 @@ visible in review.
 
 - **happy/**: the normal path. Provision → ready → work → sync → delete.
 - **sad/**: an expected failure the design handles. Create rejected, boot stalls, sync errors,
-  delete 404s, a lease renewal arrives late, a subscription expires.
+  a sync that never succeeds and ends in a recorded abandonment, delete 404s, a node that outlives
+  its machine and refuses to be forgotten, a lease renewal arrives late, a subscription expires.
 - **bad/**: hostile input the design never invited. This is the category most suites skip and the
   one that finds real bugs in a proxy and a relay.
 

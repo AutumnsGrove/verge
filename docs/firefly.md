@@ -311,6 +311,9 @@ disappears when the machine disconnects, and `NodeExists` becomes false on its o
   observes `--MachineGone-->` with a node still present calls `Network.Forget(id)`. The machine
   stays in `TERMINATING` while that is in flight, `Forget` is retried to a bounded count, and a
   `Forget` that keeps failing is `ERROR(TERMINATING)`, which raises the alarm rather than spinning.
+  `ForgetRefuses(n)` in `docs/testing.md` reproduces exactly that, and a `sad/` case asserts the
+  bounded retry count and the state after exhaustion — a repair path with no fault to exercise it
+  is the untestable seam the rest of this document is written to avoid.
 
 Without the second half, `README.md`'s *node that lingers on a private network* is a failure the
 design can only watch, and `ABSENT` is unreachable for exactly the machines that need it most: a
@@ -319,7 +322,7 @@ not a fix, it is a log line.
 
 ## Every named fault has a home
 
-`docs/testing.md` lists seven faults. Each one has a state, a transition, or a rule here, and this
+`docs/testing.md` lists eight faults. Each one has a state, a transition, or a rule here, and this
 table is the claim the pull request makes — if a row is ever wrong, one of the two documents is:
 
 | Fault | Home |
@@ -328,6 +331,7 @@ table is the claim the pull request makes — if a row is ever wrong, one of the
 | `StallBoot(d)` | `PROVISIONING --Stalled--> ERROR` at `BootDeadline`; the no-op sync destroys it at the cap |
 | `DeleteRefuses(n)` | bounded delete attempts, then `TERMINATING --Unconfirmed--> ERROR` |
 | `DeleteReturns404()` | `TERMINATING --MachineGone--> TERMINATING`; success for the machine half only |
+| `ForgetRefuses(n)` | `Forget` retried to a bounded count, then `ERROR(TERMINATING)`; a `sad/` case asserts both |
 | `ListDrops(id)` | presence in `List` is evidence, absence is not; only `Describe` resolves it |
 | `CreateIsSlow(d)` | a late create is adopted by the next `Tick` if the id came back, else swept as an orphan |
 | `MetadataMissing()` | `PROVISIONING --Stalled--> ERROR`; never `ABSENT`, because it bills |
@@ -370,11 +374,14 @@ promises. It happens on two paths, and every promise below holds on both:
   covered separately at the end of this section, because conflating the two is how a "safety"
   method quietly becomes the normal path.
 
-**Nothing is deleted before its state is saved.** No machine reaches `TERMINATING` except through a
-`SYNCING` transition — `--Synced-->` normally, `--Abandoned-->` only under the cap rule above. This
-is the ordering property in `docs/testing.md` — over any generated history, a `DELETE` for a
-machine is preceded by a successful sync for it — and it is the reason a machine keeps existing
-across a failed save.
+**Nothing is deleted through `Tick` before its state is saved.** No machine reaches `TERMINATING`
+from the loop except through a `SYNCING` row — `--Synced-->` normally, `--Abandoned-->` only under
+the cap rule above. This is the ordering property in `docs/testing.md`, in the qualified form that
+document now carries: over any generated history, a `DELETE` for a machine is preceded by a
+successful sync for it **or by a recorded abandonment**. The exception is stated once, in the
+property row and in "Where the ordering property yields"; `Destroy` is the third door, it is not
+part of the loop, and its own abandonment is counted separately. The property is the reason a
+machine keeps existing across a failed save.
 
 If the sync fails, the machine stays, the state becomes `ERROR`, and the retry syncs again. The
 asymmetry is intentional: a lingering machine costs cents and is fixable, while a destroyed machine
