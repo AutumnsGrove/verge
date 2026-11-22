@@ -12,6 +12,9 @@ registry, both boundary interfaces including the syncer, the reconcile loop (`Ti
 `Provision` are implemented in `internal/firefly`, with a fake for each outside world. A real Hetzner
 client exists and is tested against `httptest`, but has never run against the API. The tailnet client
 and the R2 store are not written.
+
+One decided change is not yet in the code: `Network` is specified above as keyed on the machine's
+name, while `internal/firefly/network.go` still takes a `MachineID`. See "What a node is called".
 `docs/testing.md` names the files the remainder will become, and every new behaviour still starts as
 a failing test.
 
@@ -551,9 +554,10 @@ type Syncer interface {
 }
 
 type Network interface {
-    Joined(ctx context.Context, id MachineID) (bool, error)
-    NodeExists(ctx context.Context, id MachineID) (bool, error)
-    Forget(ctx context.Context, id MachineID) error
+    // Keyed on the machine's name, not its provider id. See below.
+    Joined(ctx context.Context, name string) (bool, error)
+    NodeExists(ctx context.Context, name string) (bool, error)
+    Forget(ctx context.Context, name string) error
 }
 
 type Store interface {
@@ -581,6 +585,41 @@ membership and nothing else, and whose node record disappears on disconnect so t
 usually resolves itself. That distinction is the same one the whole design rests on — a credential
 that can spend money never reaches the runner; a credential that can only join a private network
 may.
+
+### What a node is called
+
+A tailnet knows devices by name; the provider knows machines by an id it mints at
+creation. Those are different things, and `Network` was keyed on the id — so
+nothing could answer "has machine `hetzner:42` joined", because nothing knew what
+device that machine was. The fake hid it by deriving the node from the machine
+record it was already holding, which is a property of the fake rather than of the
+world.
+
+**Decided: firefly mints the name, records it on the machine, and the network is
+keyed on that name.** A name has to be unique per project anyway, the provider
+requires one, and it is the one identifier a network can be asked about. So
+`Provision` generates it when the caller does not supply one, `Machine` records it,
+and `Cloud` keeps using the provider id.
+
+The alternative is viable, and the reason to reject it is not the one that first
+looked obvious. A machine can read its own provider id from
+`169.254.169.254/hetzner/v1/metadata/instance-id` after it boots — the same
+metadata service the readiness section relies on — and name itself from that, so
+the id does not have to be known before `Create`.
+
+It is rejected because it makes identity depend on a script running on the machine.
+A bootstrap that half-fails can still join the mesh, and would then appear under
+whatever name it fell back to, which is a node nobody can match to a machine and a
+`TERMINATING` machine whose node is never forgotten. The provider sets the server's
+hostname at creation and a node takes that hostname without asking the machine
+anything, so keying on the name needs no boot-time cooperation at all — and
+survives the bootstrap that failed, which is exactly the machine most likely to
+need forgetting.
+
+**Not built yet.** The interface above is the shape to implement; the code in
+`internal/firefly/network.go` still takes `MachineID`, and the tailnet client that
+would care does not exist. Recorded here so the change is a decision rather than a
+rediscovery.
 
 ### The dependency that was missing
 
@@ -628,6 +667,9 @@ Not decided here, recorded so the next document does not invent an answer by acc
    stream activity, and the kind list is one shorter. The reason to keep them is that
    `Snapshot(ctx, now)` can then report "a machine with sessions but no turns" — idle, but resumable —
    which is exactly what the UI wants to show.
-4. **Adoption after a split brain.** Two orchestrators disagreeing about one machine resolves by
+4. **Whether `Machine.Name` is the right key long-term.** It works because a name is
+   unique per project and required by the API. If machines ever span projects, the
+   name stops being unique across them and the key needs the project too.
+5. **Adoption after a split brain.** Two orchestrators disagreeing about one machine resolves by
    the cloud's label and the earlier `MaxLifetime` deadline, but the tie-break deserves a `bad/`
    case and a paragraph.
