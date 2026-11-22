@@ -779,3 +779,169 @@ func TestAbandonmentIsReachableAtTheCap(t *testing.T) {
 		t.Fatalf("after abandoning, the machine is %s", m.State)
 	}
 }
+
+// TestProvision covers creating a machine: the one operation that turns nothing
+// into something billable.
+func TestProvision(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("happy/records_a_provisioning_machine", func(t *testing.T) {
+		h := newHarness(t)
+		id, err := h.f.Provision(ctx, firefly.Spec{Image: "ubuntu-24.04"}, at(0))
+		if err != nil {
+			t.Fatalf("Provision: %v", err)
+		}
+		if id == "" {
+			t.Fatal("Provision returned an empty id")
+		}
+		if got := h.stateOf(id); got != firefly.Provisioning {
+			t.Fatalf("state = %s, want %s", got, firefly.Provisioning)
+		}
+
+		doc, _ := h.store.Load(ctx)
+		m, ok := doc.Machine(id)
+		if !ok {
+			t.Fatal("the machine is not in the document")
+		}
+		if want := at(4 * time.Hour); !m.Deadline.Equal(want) {
+			t.Fatalf("Deadline = %s, want %s", m.Deadline, want)
+		}
+	})
+
+	// The label is firefly's, not the caller's: a machine created without it is
+	// invisible to List, so the sweep cannot find it and it bills unmanaged.
+	t.Run("happy/the_label_is_always_applied", func(t *testing.T) {
+		h := newHarness(t)
+		id, err := h.f.Provision(ctx, firefly.Spec{Labels: map[string]string{"outpost": "minecraft"}}, at(0))
+		if err != nil {
+			t.Fatalf("Provision: %v", err)
+		}
+		listed, err := h.cloud.List(ctx, "verge=machine")
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		found := false
+		for _, cm := range listed {
+			if cm.ID == id {
+				found = true
+				if cm.Labels["outpost"] != "minecraft" {
+					t.Fatalf("the caller's label was lost: %v", cm.Labels)
+				}
+			}
+		}
+		if !found {
+			t.Fatal("the machine is not visible under our label")
+		}
+	})
+
+	t.Run("happy/a_wrong_label_from_the_caller_is_overwritten", func(t *testing.T) {
+		h := newHarness(t)
+		id, err := h.f.Provision(ctx, firefly.Spec{Labels: map[string]string{"verge": "wrong"}}, at(0))
+		if err != nil {
+			t.Fatalf("Provision: %v", err)
+		}
+		listed, err := h.cloud.List(ctx, "verge=machine")
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		for _, cm := range listed {
+			if cm.ID == id {
+				return
+			}
+		}
+		t.Fatal("a caller-supplied label overrode ours and hid the machine")
+	})
+
+	t.Run("sad/failed_create_records_nothing", func(t *testing.T) {
+		boom := errors.New("quota exceeded")
+		h := newHarness(t, func(c *fake.Cloud, _ *fake.Network) { c.FailCreate(boom) })
+
+		if _, err := h.f.Provision(ctx, firefly.Spec{}, at(0)); !errors.Is(err, boom) {
+			t.Fatalf("Provision = %v, want the provider's error", err)
+		}
+		doc, err := h.store.Load(ctx)
+		if !errors.Is(err, firefly.ErrNoDocument) {
+			t.Fatalf("a failed create wrote a document: %v", err)
+		}
+		_ = doc
+	})
+
+	t.Run("sad/second_attempt_backs_off", func(t *testing.T) {
+		h := newHarness(t, func(c *fake.Cloud, _ *fake.Network) { c.FailCreate(errors.New("quota")) })
+		if _, err := h.f.Provision(ctx, firefly.Spec{}, at(0)); err == nil {
+			t.Fatal("the first create succeeded")
+		}
+		if _, err := h.f.Provision(ctx, firefly.Spec{}, at(time.Second)); !errors.Is(err, firefly.ErrProvisioningBackoff) {
+			t.Fatalf("Provision during backoff = %v, want ErrProvisioningBackoff", err)
+		}
+	})
+
+	t.Run("happy/backoff_clears_before_a_later_attempt", func(t *testing.T) {
+		h := newHarness(t, func(c *fake.Cloud, _ *fake.Network) { c.FailCreate(errors.New("quota")) })
+		if _, err := h.f.Provision(ctx, firefly.Spec{}, at(0)); err == nil {
+			t.Fatal("the first create succeeded")
+		}
+
+		// Retried on the same firefly, past RetryBase: the backoff is over, so the
+		// error must be the provider's again rather than ErrProvisioningBackoff.
+		// Building a second Firefly instead would assert nothing about this one.
+		_, err := h.f.Provision(ctx, firefly.Spec{}, at(30*time.Second))
+		if err == nil || errors.Is(err, firefly.ErrProvisioningBackoff) {
+			t.Fatalf("second attempt = %v, want the provider's error", err)
+		}
+	})
+}
+
+// TestProvisionOrphanIsAdopted is the repair for a create that succeeded and a
+// save that did not: the machine exists, the document does not know, and the next
+// pass picks it up rather than leaving it unmanaged.
+func TestProvisionOrphanIsAdopted(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+
+	rejecting := &toggleStore{inner: h.store}
+	cfg := firefly.Config{
+		Store: rejecting, Cloud: h.cloud, Network: h.net, Syncer: h.sync,
+		Label: "verge=machine", MaxLifetime: 4 * time.Hour, DrainWindow: 15 * time.Minute,
+		BootDeadline: 10 * time.Minute, SyncAttempts: 3,
+		TerminateDeadline: 5 * time.Minute, RetryBase: 30 * time.Second, RetryMax: 5 * time.Minute,
+	}
+	f, err := firefly.New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	h.f = f
+
+	rejecting.fail = true
+	id, err := f.Provision(ctx, firefly.Spec{}, at(0))
+	if err == nil {
+		t.Fatal("Provision succeeded while the store rejected writes")
+	}
+	if id == "" {
+		t.Fatal("Provision did not report the id of the machine it created")
+	}
+
+	rejecting.fail = false
+	h.cloud.Advance(time.Minute)
+	res := h.tick(at(time.Minute))
+	if len(res.Adopted) != 1 || res.Adopted[0] != id {
+		t.Fatalf("Adopted = %v, want [%s]", res.Adopted, id)
+	}
+}
+
+// toggleStore rejects saves while fail is set.
+type toggleStore struct {
+	inner *firefly.MemStore
+	fail  bool
+}
+
+func (s *toggleStore) Load(ctx context.Context) (firefly.Document, error) {
+	return s.inner.Load(ctx)
+}
+
+func (s *toggleStore) Save(ctx context.Context, doc firefly.Document) error {
+	if s.fail {
+		return errors.New("store: write rejected")
+	}
+	return s.inner.Save(ctx, doc)
+}

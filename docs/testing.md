@@ -32,6 +32,7 @@ internal/
     tick.go                   the reconcile loop, the orphan sweep, Result
     tick_test.go              the whole lifecycle against the shared fakes
     sync.go                   the Syncer boundary: saving the machine's own state
+    provision.go              creating one machine, and the failed-create backoff
     firefly_test.go           the registry, id continuity, failed saves
     order_test.go             the sync-before-delete invariant
     testdata/golden/          recorded event logs, replayed by the fake
