@@ -251,7 +251,8 @@ be destroyed is a machine that bills until someone notices:
 - **A sync that keeps failing past the cap abandons the save.** `SYNCING --SyncFailed--> ERROR`
   retries to a bounded `SyncAttempts`, and once the cap has passed the machine takes
   `SYNCING --Abandoned--> TERMINATING`: it is deleted, and the abandonment is *recorded* — a
-  data-loss warning naming what was not saved, and the same counter the operator override uses.
+  data-loss warning naming what was not saved, and the abandonment counter, labelled
+  `reason=sync_failed`.
 
 That second rule is a real hole in the ordering property, so it is named as one rather than
 implied. See "Where the ordering property yields".
@@ -380,8 +381,8 @@ the cap rule above. This is the ordering property in `docs/testing.md`, in the q
 document now carries: over any generated history, a `DELETE` for a machine is preceded by a
 successful sync for it **or by a recorded abandonment**. The exception is stated once, in the
 property row and in "Where the ordering property yields"; `Destroy` is the third door, it is not
-part of the loop, and its own abandonment is counted separately. The property is the reason a
-machine keeps existing across a failed save.
+part of the loop, and its abandonment is counted against the same counter under a different reason
+label. The property is the reason a machine keeps existing across a failed save.
 
 If the sync fails, the machine stays, the state becomes `ERROR`, and the retry syncs again. The
 asymmetry is intentional: a lingering machine costs cents and is fixable, while a destroyed machine
@@ -405,8 +406,9 @@ succeeds — is a `sad/` case with a bounded number of attempts, then `ERROR`, t
 catching, and the design closes it structurally rather than with care: the transition into
 `TERMINATING` is only reachable from a `SYNCING` row, so there is no interleaving in which a save is
 in flight when the delete is issued. The hard cap does not break this — it routes *through*
-`SYNCING`, so the cap can delay a teardown but never skip one. Two cases still
-abandon a save — one automatic, one manual — and both are counted. See below.
+`SYNCING`, so the cap can delay a teardown but never skip one. Two cases still abandon a save — one
+automatic, one manual — and both are counted, which is why the counter is labelled rather than
+merely incremented. See below.
 
 ### Where the ordering property yields
 
@@ -416,13 +418,26 @@ A save is abandoned in exactly two situations:
 1. **The sync has failed for the whole lifetime of the machine.** At `MaxLifetime`, with
    `SyncAttempts` exhausted, the machine takes `SYNCING --Abandoned--> TERMINATING`. It is deleted
    because the alternative is billing forever, and the loss is recorded: a data-loss warning naming
-   what was not saved, and a counter increment.
+   what was not saved, and an `abandonments_total{reason="sync_failed"}` increment.
 2. **An operator says so.** `Destroy(ctx, machine, reason)` is the interface method, and it reaches
    `TERMINATING` without a sync at all. It exists for exactly two callers: a human at a shell, and
    the E2E sweeper in `docs/testing.md` that reaps anything older than thirty minutes.
 
 `Destroy` is not a transition and is not reachable from `Tick`. Every path in (1) and (2) logs what
-was lost and increments the same counter, whose correct steady-state value is zero.
+was lost and increments **one** counter, because a single number is what makes it impossible for a
+new teardown path to forget to count itself. Sharing the counter only works if the two reasons are
+distinguishable, so it is labelled:
+
+| Series | Incremented by | Correct steady state |
+|---|---|---|
+| `abandonments_total{reason="sync_failed"}` | case (1), the cap | **zero**, always, in every environment |
+| `abandonments_total{reason="operator"}` | case (2), `Destroy` | zero in production; nonzero wherever the E2E sweeper runs, by design |
+
+The alarm is therefore on the series, not the total. An earlier draft of this paragraph said a
+nonzero counter meant something upstream was failing to sync, which was wrong the moment the E2E
+sweeper — a legitimate caller of (2) that runs every thirty minutes — was taken seriously:
+`reason="operator"` is expected to be nonzero there, and only `reason="sync_failed"` is a
+never-event. Same counter, two contracts.
 
 Case (1) is reachable from `Tick`, so the property needs an exception and **`docs/testing.md` says
 so**: its ordering row now reads "preceded by a successful sync for it, or by a recorded
@@ -443,8 +458,10 @@ The property is kept honest by saying precisely where each form holds:
   warning names what was lost. A hole with a test is a decision; a hole with only prose is a bug
   waiting for its first busy night.
 
-If the counter is nonzero on a normal day, something upstream is failing to sync and the number is
-the alarm, not the fix.
+If `abandonments_total{reason="sync_failed"}` is nonzero on a normal day, something upstream is
+failing to sync and the number is the alarm, not the fix. A nonzero `reason="operator"` outside the
+E2E project means someone is stopping machines by hand, which is worth knowing and is not a bug in
+this package.
 
 ## What firefly depends on
 
