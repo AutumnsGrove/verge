@@ -163,6 +163,22 @@ var transitions = []Transition{
 	{Error, Capped, Syncing},
 }
 
+// retryOrigins returns the states an Error can be entered from, derived from
+// the table rather than listed again.
+//
+// Two copies of this list would eventually disagree, and the disagreement would
+// show up as a document that validates but cannot be retried, or one that can be
+// retried into a state the table has no row for.
+func retryOrigins() map[State]struct{} {
+	out := make(map[State]struct{})
+	for _, tr := range transitions {
+		if tr.From == Error && tr.On == RetryDue {
+			out[tr.To] = struct{}{}
+		}
+	}
+	return out
+}
+
 // Cappable reports whether the hard cap may push a machine into Syncing.
 //
 // It is a predicate over state *and* origin, not a set of states, because one

@@ -7,9 +7,10 @@ or money. It answers a single question on a loop: *given the leases currently he
 machines that currently exist, what must change?* Everything else in this repository argues with
 it through three narrow interfaces, and it is handed the current time rather than looking it up.
 
-The transition table and the lease arithmetic are implemented in `internal/firefly`; the reconcile
-loop, the cloud and network clients, and the state store are not. `docs/testing.md` names the files
-the remainder will become, and every new behaviour still starts as a failing test.
+The transition table, the lease arithmetic, and the durable document with its in-memory store are
+implemented in `internal/firefly`; the reconcile loop and the cloud and network clients are not.
+`docs/testing.md` names the files the remainder will become, and every new behaviour still starts as
+a failing test.
 
 One word on vocabulary: this document says **machine**, the product vocabulary of `README.md`.
 Where `docs/testing.md` says *instance* it means the same thing; the property names there are left
@@ -151,13 +152,19 @@ A lease is a record, not a goroutine. It has no expiry callback, no timer, and n
 
 ```go
 type Lease struct {
-    ID     LeaseID       // minted by firefly, opaque
-    Holder string        // policy's name; never parsed by firefly
-    Kind   Kind          // Turn | Session | Subscription
-    Start  time.Time     // set by firefly from now, never by the caller
-    TTL    time.Duration
+    ID      LeaseID       // minted by firefly, opaque
+    Machine MachineID     // which machine this keeps alive
+    Holder  string        // policy's name; never parsed by firefly
+    Kind    Kind          // Turn | Session | Subscription
+    Start   time.Time     // set by firefly from now, never by the caller
+    TTL     time.Duration
 }
 ```
+
+`Machine` was missing from the first version of this document, and writing the store found it:
+the design talks throughout about leases *on an instance* — `Live(instance)`, "the last lease
+lapses" — while the record had no way to say which instance. A lease that cannot name its machine
+cannot be counted against one, pruned with one, or validated against a state document.
 
 The struct is what is stored and read; `Acquire` takes the four facts separately, because a caller
 that supplies its own `Start` could backdate a lease, and there is no reason to allow it. A lease
@@ -522,10 +529,16 @@ type Network interface {
 }
 
 type Store interface {
-    Load(ctx context.Context) (State, error)
-    Save(ctx context.Context, s State) error
+    Load(ctx context.Context) (Document, error)
+    Save(ctx context.Context, doc Document) error
 }
 ```
+
+The stored type is `Document`, not `State`, because `State` already means a machine's position in
+the transition table and one name for both would make every sentence in this file ambiguous. A
+`Document` is the machines plus the leases, versioned, whole-document on both read and write: a
+partial update could record a machine as terminating while its lease still holds it open, which is
+the state the ordering property exists to make impossible.
 
 `Spec` carries the rendered cloud-init, the image, the region, the size, and the labels. It does not
 carry a provider credential — no path through this package can put a key on a box, which is the line
@@ -552,9 +565,11 @@ Named so that review can point at them and say "not here":
 
 Not decided here, recorded so the next document does not invent an answer by accident:
 
-1. **Lease durability granularity.** One state document for all machines is simplest and is what
-   this doc assumes. A shard per machine would survive a partial write better and complicate the
-   orphan sweep. Decide when the first two-machine test exists.
+1. **Lease durability granularity.** Decided for now: **one document for all machines**, and the
+   store validates it on both read and write. A shard per machine would survive a partial write
+   better, but a partial write needs a crash at a specific instant while the orphan sweep runs every
+   tick, and the sweep is materially harder against shards. Revisit when there is a two-machine
+   test and something in it worth losing.
 2. **The drain window's default.** Long enough to survive a turn boundary, short enough not to be
    noticed on a bill. Guess: fifteen minutes. Measure before fixing.
 3. **Whether `Turn` leases are worth their own kind.** They may collapse into `Session` renewed by
