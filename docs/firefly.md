@@ -5,7 +5,7 @@ The machinery that keeps exactly as many machines alive as the work needs, and n
 Firefly is one package, `internal/firefly`, with no knowledge of sessions, repositories, models,
 or money. It answers a single question on a loop: *given the leases currently held and the
 machines that currently exist, what must change?* Everything else in this repository argues with
-it through two interfaces and a clock.
+it through three narrow interfaces, and it is handed the current time rather than looking it up.
 
 Design only. No Go yet — `docs/testing.md` names the files this will become, and the first commit
 that implements any of it is a failing test.
@@ -46,7 +46,8 @@ the boundary has leaked.
 
 ```go
 type Firefly interface {
-    // Tick reconciles once, at now. The only method that changes cloud state.
+    // Tick reconciles once, at now. The only method that changes cloud state on
+    // its own; Destroy below is an instruction, not a step it decides to take.
     Tick(ctx context.Context, now time.Time) (Result, error)
 
     // Leases. Acquire and Renew are the only ways to make a machine stay.
@@ -142,7 +143,18 @@ already been counted as gone. A renewal for a lapsed lease is a `sad/` case, not
 waking anyone for: the session re-acquires.
 
 `Release` is idempotent. A second release of the same ID is not an error — a crashed turn and a
-supervisor racing to clean up will both call it, and one of them is not a bug.
+supervisor racing to clean up will both call it, and one of them is not a bug. `Release` on an
+unknown, already-released, or pruned ID is `nil` for the same reason.
+
+A lease record outlives its liveness and must not outlive its usefulness. Expired records are
+pruned by `Tick` once they are past `Start+TTL` and no machine's teardown still depends on them, so
+the state document does not grow without bound. Until pruned they are inert: `Live` ignores them,
+so a stale record cannot hold a machine open.
+
+`Renew` on a lapsed lease returns `ErrLeaseExpired` rather than quietly re-acquiring. The
+distinction matters — a silent re-acquire would let a supervisor hold a machine open with a lease
+the caller believes it lost — and the `sad/` case exists to assert the error rather than the
+behaviour.
 
 Leases are durable. They live in the same state document as the machine records, so a restart of
 the orchestrator does not destroy every machine. On start, firefly reads leases back and reconciles
@@ -171,6 +183,7 @@ The transitions are **data**, in a table, per `docs/testing.md`:
 
 ```
 ABSENT      --Need-->              PROVISIONING
+ABSENT      --CreateFailed-->      ABSENT           (backoff recorded; nothing to describe)
 PROVISIONING --Created-->          PROVISIONING     (id recorded, not yet answering)
 PROVISIONING --Answered-->         READY
 PROVISIONING --Stalled-->          ERROR            (boot exceeded BootDeadline)
@@ -179,14 +192,15 @@ DRAINING    --LeaseArrived-->      READY            (the drain window is not a p
 DRAINING    --Drained-->           SYNCING
 SYNCING     --Synced-->            TERMINATING
 SYNCING     --SyncFailed-->        ERROR            (and the machine stays)
+SYNCING     --Abandoned-->         TERMINATING      (cap reached, save recorded as lost)
+TERMINATING --MachineGone-->       TERMINATING      (404 or confirmed gone; node half may remain)
 TERMINATING --Confirmed-->         ABSENT            (machine gone and node gone)
-TERMINATING --Gone-->              ABSENT            (a 404 is success)
 TERMINATING --Unconfirmed-->       ERROR            (deadline passed; re-check, never wait)
 ERROR       --RetryDue-->          <the state it came from>
-any         --Capped-->            SYNCING          (hard cap; sync first, always)
+cappable    --Capped-->            SYNCING          (see below: not every state is cappable)
 ```
 
-Two rows exist because of named failures in the previous design and are not optional:
+Three rows exist because of named failures and are not optional:
 
 - **`TERMINATING --Unconfirmed--> ERROR`.** `TERMINATING` is the state that once slept forever: a
   delete was issued and the code then waited on a machine that had already gone. A machine in
@@ -195,14 +209,42 @@ Two rows exist because of named failures in the previous design and are not opti
 - **`DRAINING --LeaseArrived--> READY`.** The drain window is a courtesy, not a commitment. Work
   arriving during it costs nothing to accept, and a design that makes it a one-way door turns a
   busy session into a cold clone.
+- **`TERMINATING --MachineGone--> TERMINATING`.** A 404, or a `Describe` that no longer finds the
+  machine, resolves the *machine* half of deletion and nothing else. It is not an exit: the node
+  record can outlive the machine, and only `--Confirmed-->` leaves.
 
 `ERROR --RetryDue--> <origin>` is the one row that is not a pair of literals. `ERROR` records the
 state it came from, so the table holds one concrete row per origin and the transition gate still
 loops over named cases with nothing wildcarded. A retry that cannot name its origin is a bug in the
 record, not a case to handle.
 
-`any --Capped--> SYNCING` is deliberate: the hard cap routes *through* the sync, so a capped
-machine saves its work. See "Destroy" for the one case where even that yields.
+`ABSENT --CreateFailed--> ABSENT` exists because `ERROR` cannot hold it. `ERROR` means a step failed
+and *the machine still exists*; a create that fails creates nothing. So the attempt count, the
+backoff, and the last error live on the machine *request* rather than on a machine record, `ABSENT`
+stays `ABSENT`, and the caller logs `FailCreate` from the request. A state that pretends a machine
+exists in order to remember an error about a machine that does not exist is how the next `Tick`
+ends up sending `Describe` for an ID that was never assigned.
+
+`cappable --Capped--> SYNCING` is deliberate, and `cappable` is a named set rather than `any`:
+`{PROVISIONING, READY, DRAINING, ERROR}`. The hard cap routes *through* the sync, so a capped
+machine saves its work. `ABSENT` has nothing to cap, `SYNCING` is already doing the thing the cap
+wants, and `TERMINATING` must never be pushed backwards — a cap that interrupted a delete in flight
+would un-issue it.
+
+Two rules make that route terminate instead of loop, and both matter because a machine that cannot
+be destroyed is a machine that bills until someone notices:
+
+- **A machine that never reached `READY` has nothing to save.** Its sync succeeds trivially — no
+  workspace, no session — so `PROVISIONING --Stalled--> ERROR` reaches `TERMINATING` through a
+  `--Capped-->` and a no-op sync. Without this, a boot that never answers would be undestroyable by
+  design, which is the opposite of what the hard cap is for.
+- **A sync that keeps failing past the cap abandons the save.** `SYNCING --SyncFailed--> ERROR`
+  retries to a bounded `SyncAttempts`, and once the cap has passed the machine takes
+  `SYNCING --Abandoned--> TERMINATING`: it is deleted, and the abandonment is *recorded* — a
+  data-loss warning naming what was not saved, and the same counter the operator override uses.
+
+That second rule is a real hole in the ordering property, so it is named as one rather than
+implied. See "Where the ordering property yields".
 
 ## Two state machines, deliberately
 
@@ -231,20 +273,39 @@ and one of them is *a node that lingers on a private network*; the contract tier
 `docs/testing.md` says *boots, joins, leases, syncs, destroys* for the same reason. So readiness is
 conjunctive, and each half has its own way of lying:
 
-| Symptom | Fact | Fault |
-|---|---|---|
-| boots, never answers | metadata never came up | `MetadataMissing` |
-| answers, never joins | the network key was rejected or the join hung | `StallBoot` |
+| Symptom | Fact | Read by | Fault |
+|---|---|---|---|
+| boots, never answers | metadata never came up | `Cloud.Describe` | `MetadataMissing` |
+| answers, never joins | the network key was rejected or the join hung | `Network.Joined` | `StallBoot` |
+
+Both columns matter. A guarantee that names a fact no interface can read is not a guarantee, it is
+a wish — which is why the `Network` interface in "What firefly depends on" exists at all, and why
+the second row is the one that is easiest to write and hardest to compute.
 
 A machine that boots and never answers is *not* `ABSENT`: it exists, it is billing, and it must be
 swept.
 
 **Deletion is two facts as well.** A machine can be gone from the provider and still be a member of
 the network — its node record outlives it, and a tailnet accumulates those quietly. `TERMINATING`
-reaches `ABSENT` only when the provider has confirmed the machine *and* the node record is no longer
-present. Until then it is `TERMINATING`, and past its deadline, `ERROR` with a `LastErr` that
-names which half is outstanding. A `DELETE` that returns 404 therefore resolves the machine half and
-still has work to do.
+reaches `ABSENT` only when `Cloud.Describe` confirms the machine is gone *and* `Network.NodeExists`
+returns false. Until then it is `TERMINATING`, and past its deadline, `ERROR` with a `LastErr` naming
+which half is outstanding. A `DELETE` that returns 404 resolves the machine half and still has work
+to do.
+
+## Every named fault has a home
+
+`docs/testing.md` lists seven faults. Each one has a state, a transition, or a rule here, and this
+table is the claim the pull request makes — if a row is ever wrong, one of the two documents is:
+
+| Fault | Home |
+|---|---|
+| `FailCreate(err)` | `ABSENT --CreateFailed--> ABSENT`; backoff on the request record, nothing to describe |
+| `StallBoot(d)` | `PROVISIONING --Stalled--> ERROR` at `BootDeadline`; the no-op sync destroys it at the cap |
+| `DeleteRefuses(n)` | bounded delete attempts, then `TERMINATING --Unconfirmed--> ERROR` |
+| `DeleteReturns404()` | `TERMINATING --MachineGone--> TERMINATING`; success for the machine half only |
+| `ListDrops(id)` | presence in `List` is evidence, absence is not; only `Describe` resolves it |
+| `CreateIsSlow(d)` | a late create is adopted by the next `Tick` if the id came back, else swept as an orphan |
+| `MetadataMissing()` | `PROVISIONING --Stalled--> ERROR`; never `ABSENT`, because it bills |
 
 ## The reconcile loop
 
@@ -252,8 +313,14 @@ still has work to do.
 
 1. Read the cloud's view (`List`, filtered by our label) and the state document. Union them.
    A machine in the union but not in the state document is an **orphan**: it is adopted if it
-   carries our lease label and is younger than `MaxLifetime`, and swept otherwise. Firefly trusts
-   the cloud over its own memory, because the cloud is the thing that bills.
+   carries our lease label and is younger than `MaxLifetime`, and swept otherwise.
+
+   **Presence in `List` is evidence; absence is not.** `ListDrops(id)` in `docs/testing.md` models
+   eventual consistency — the API does not know about a machine that exists — so "not in `List`"
+   never means gone and never permits a second provision or a confirmed delete. Only a direct
+   `Describe` returning not-found resolves the machine half, and only `Network.NodeExists` returning
+   false resolves the node half. Taking absence from a listing as absence from the world is how a
+   design provisions a second machine beside a live one and then pays for both.
 2. Update live-lease counts per machine, at `now`.
 3. Walk each machine forward one transition at most.
 4. Write the state document once, if anything changed.
@@ -267,63 +334,81 @@ transition sequence.
 the wall clock or sleep. Firefly itself contains no `time.Now()` and no `time.Sleep`, and the AST
 gate in `docs/testing.md` enforces it rather than review.
 
-## Destroy
+## Deletion
 
-`Destroy` is the only operation that loses data, and the doc's real content is what it promises.
+Deletion is the only operation that loses data, and the real content of this document is what it
+promises. It happens on two paths, and every promise below holds on both:
 
-**A machine is destroyed only after its state has been saved.** Nothing in the state machine
-reaches `TERMINATING` except from `SYNCING --Synced-->`. This is the ordering property in
-`docs/testing.md` — over any generated history, a `DELETE` for a machine is preceded by a
-successful sync for it — and it is the reason the machine keeps existing across a failed save.
+- **Inside `Tick`**, as the teardown every machine eventually takes:
+  `DRAINING → SYNCING → TERMINATING → ABSENT`.
+- **Through `Destroy`**, the explicit operator method, which is not a step of that sequence. It is
+  covered separately at the end of this section, because conflating the two is how a "safety"
+  method quietly becomes the normal path.
+
+**Nothing is deleted before its state is saved.** No machine reaches `TERMINATING` except through a
+`SYNCING` transition — `--Synced-->` normally, `--Abandoned-->` only under the cap rule above. This
+is the ordering property in `docs/testing.md` — over any generated history, a `DELETE` for a
+machine is preceded by a successful sync for it — and it is the reason a machine keeps existing
+across a failed save.
 
 If the sync fails, the machine stays, the state becomes `ERROR`, and the retry syncs again. The
 asymmetry is intentional: a lingering machine costs cents and is fixable, while a destroyed machine
-holding an hour of uncommitted work is not fixable at any price. Firefly always pays the few cents.
+holding an hour of uncommitted work is not fixable at any price. Firefly always pays the few cents
+first, and abandons only when the cap leaves no alternative.
 
-**`Destroy` is idempotent, and a 404 is success.** `DeleteReturns404` in the fake models the common
-real case — a delete submitted twice, a machine reaped by the provider, an operator using the
-console. It is indistinguishable from a clean delete and is treated as one.
+**Deletion is idempotent, and a 404 is success for the machine half.** `DeleteReturns404` in the
+fake models the common real case — a delete submitted twice, a machine reaped by the provider, an
+operator using the console. It is indistinguishable from a clean delete, and it resolves exactly
+one of the two facts: the node record may still be there, so the machine stays in `TERMINATING`
+until `Network.NodeExists` says otherwise.
 
-**`Destroy` is deadline-bounded and never waits.** It issues the delete, records `TERMINATING`, and
+**Deletion is deadline-bounded and never waits.** It issues the delete, records `TERMINATING`, and
 returns. Confirmation arrives on a later `Tick`. A delete that has not confirmed by its deadline
 moves to `ERROR` and is re-checked by reading, not by blocking.
 
-**`Destroy` retries a refusing provider.** `DeleteRefuses(n)` — a delete that fails n times then
+**Deletion retries a refusing provider.** `DeleteRefuses(n)` — a delete that fails n times then
 succeeds — is a `sad/` case with a bounded number of attempts, then `ERROR`, then the operator.
 
 **A delete cannot race a save.** This is the third of the failures `README.md` says are worth
 catching, and the design closes it structurally rather than with care: the transition into
-`TERMINATING` is only reachable from `SYNCING --Synced-->`, so there is no interleaving in which a
-save is in flight when the delete is issued. The hard cap does not break this — `any --Capped-->
-SYNCING` routes *through* the save, so the cap can delay a teardown but never skip one. The one
-case where a save is genuinely abandoned is the operator override below, which is not a transition
-and is counted.
+`TERMINATING` is only reachable from a `SYNCING` row, so there is no interleaving in which a save is
+in flight when the delete is issued. The hard cap does not break this — it routes *through*
+`SYNCING`, so the cap can delay a teardown but never skip one. Two cases still
+abandon a save — one automatic, one manual — and both are counted. See below.
 
-### The one hole, named
+### Where the ordering property yields
 
-`Destroy(ctx, machine, reason)` is an operator override that reaches `TERMINATING` without a sync.
-It exists for exactly two callers: an operator at a shell, and the E2E sweeper in
-`docs/testing.md` that reaps anything older than thirty minutes.
+The property needs a caveat to be true, so the caveat is stated here rather than discovered later.
+A save is abandoned in exactly two situations:
 
-It is not a transition. It is not reachable from `Tick`. It always logs a data-loss warning naming
-what was not saved, and it increments a counter whose correct steady-state value is zero.
+1. **The sync has failed for the whole lifetime of the machine.** At `MaxLifetime`, with
+   `SyncAttempts` exhausted, the machine takes `SYNCING --Abandoned--> TERMINATING`. It is deleted
+   because the alternative is billing forever, and the loss is recorded: a data-loss warning naming
+   what was not saved, and a counter increment.
+2. **An operator says so.** `Destroy(ctx, machine, reason)` is the interface method, and it reaches
+   `TERMINATING` without a sync at all. It exists for exactly two callers: a human at a shell, and
+   the E2E sweeper in `docs/testing.md` that reaps anything older than thirty minutes.
 
-This is the seam where the ordering property and the hard cap genuinely collide, so it is worth
-being explicit about how it is kept honest:
+`Destroy` is not a transition and is not reachable from `Tick`. Every path in (1) and (2) logs what
+was lost and increments the same counter, whose correct steady-state value is zero.
 
-- the property is stated over histories *generated by `Tick`*, which is what `pgregory.net/rapid`
-  generates, and holds absolutely there;
-- the hard cap does not use the hole — it routes through `SYNCING`, so even a runaway machine syncs
-  before it dies;
-- the hole exists for the case where the *orchestrator itself* is gone and a human has to stop the
-  bleeding. There is no state machine to walk, which is why it cannot be one.
+The property is kept honest by saying precisely where it holds:
 
-If the override counter is ever nonzero on a normal day, something upstream is failing to sync and
-the number is the alarm, not the fix.
+- over any history **generated by `Tick` in which the sync eventually succeeds**, it holds
+  absolutely — and that is the history `pgregory.net/rapid` generates by default;
+- the cap does not reach the hole first: it routes through `SYNCING`, so a runaway *healthy*
+  machine always syncs before it dies. Only a sync that cannot succeed reaches `--Abandoned-->`;
+- the abandonment is a tested behaviour, not a paragraph. A `sad/` case injects a permanent sync
+  failure and asserts three things: the machine is gone, the counter is exactly one, and the
+  warning names what was lost. A hole with a test is a decision; a hole with only prose is a bug
+  waiting for its first busy night.
+
+If the counter is nonzero on a normal day, something upstream is failing to sync and the number is
+the alarm, not the fix.
 
 ## What firefly depends on
 
-Two interfaces, both narrow enough to fake in the integration tier.
+Three interfaces, all narrow enough to fake in the integration tier.
 
 ```go
 type Cloud interface {
@@ -331,6 +416,14 @@ type Cloud interface {
     Describe(ctx context.Context, id MachineID) (Machine, error)
     List(ctx context.Context, label string) ([]Machine, error)
     Delete(ctx context.Context, id MachineID) error
+}
+
+// Network makes both two-fact rules computable. Without it, "joined the private
+// network" and "the node record is gone" are things the design requires and
+// cannot observe.
+type Network interface {
+    Joined(ctx context.Context, id MachineID) (bool, error)
+    NodeExists(ctx context.Context, id MachineID) (bool, error)
 }
 
 type Store interface {
@@ -341,7 +434,10 @@ type Store interface {
 
 `Spec` carries the rendered cloud-init, the image, the region, the size, and the labels. It does not
 carry a provider credential — no path through this package can put a key on a box, which is the line
-`legacy/grove-bloom/README.md` asks you to notice.
+`legacy/grove-bloom/README.md` asks you to notice. It does carry what a machine needs to *join* the
+network: the mesh address and a single-use, short-lived enrolment key that grants membership and
+nothing else. That distinction is the same one the whole design rests on — a credential that can
+spend money never reaches the runner; a credential that can only join a private network may.
 
 ## What firefly does not own
 
