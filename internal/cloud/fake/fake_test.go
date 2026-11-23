@@ -351,3 +351,90 @@ func TestCounts(t *testing.T) {
 		t.Fatalf("Calls() = %d/%d/%d/%d, want 1/1/1/1", creates, describes, lists, deletes)
 	}
 }
+
+// TestNames models the two things the provider does with a name that firefly has to
+// live with: it invents one when nobody says, and it refuses a duplicate, because a
+// name is unique within a project.
+//
+// Neither is cosmetic. The name is the key the network is asked about, so a fake
+// that accepted duplicates would let firefly mint one name for two machines and the
+// suite would not notice.
+func TestNames(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("happy/a_nameless_request_gets_a_unique_one", func(t *testing.T) {
+		c := New(fakeBase).Boot(0)
+		first, err := c.Create(ctx, spec())
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		second, err := c.Create(ctx, spec())
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+
+		a, _ := c.Name(first)
+		b, _ := c.Name(second)
+		if a == "" || b == "" {
+			t.Fatalf("names = %q, %q; the provider always assigns one", a, b)
+		}
+		if a == b {
+			t.Fatalf("two machines were named %q", a)
+		}
+	})
+
+	t.Run("happy/the_name_is_reported_back", func(t *testing.T) {
+		c := New(fakeBase).Boot(0)
+		s := spec()
+		s.Name = "runner-a"
+		id, err := c.Create(ctx, s)
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+
+		got, err := c.Describe(ctx, id)
+		if err != nil {
+			t.Fatalf("Describe: %v", err)
+		}
+		if got.Name != "runner-a" {
+			t.Fatalf("Describe reported name %q, want runner-a", got.Name)
+		}
+		listed, err := c.List(ctx, "verge=machine")
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if len(listed) != 1 || listed[0].Name != "runner-a" {
+			t.Fatalf("List reported %+v, want one machine named runner-a", listed)
+		}
+	})
+
+	t.Run("bad/a_taken_name_is_refused", func(t *testing.T) {
+		c := New(fakeBase).Boot(0)
+		s := spec()
+		s.Name = "twice"
+		if _, err := c.Create(ctx, s); err != nil {
+			t.Fatalf("the first Create: %v", err)
+		}
+		if _, err := c.Create(ctx, s); err == nil {
+			t.Fatal("the provider accepted a second machine with the same name")
+		}
+	})
+
+	t.Run("happy/a_deleted_machines_name_can_be_reused", func(t *testing.T) {
+		c := New(fakeBase).Boot(0)
+		s := spec()
+		s.Name = "recycled"
+		id, err := c.Create(ctx, s)
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if err := c.Delete(ctx, id); err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+		c.Advance(time.Hour)
+
+		if _, err := c.Create(ctx, s); err != nil {
+			t.Fatalf("the name was still held after the machine was gone: %v", err)
+		}
+	})
+}

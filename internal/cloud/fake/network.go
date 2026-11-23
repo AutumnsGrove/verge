@@ -30,20 +30,34 @@ type Network struct {
 	// forgetRefuses makes the next n forgets fail before one succeeds.
 	forgetRefuses int
 
-	// forgotten holds the ids whose records were removed. It is the only mutable
+	// forgotten holds the names whose records were removed. It is the only mutable
 	// state in this half: everything else is derived from the cloud's records.
-	forgotten map[firefly.MachineID]bool
+	//
+	// Names, not ids, because that is what a tailnet knows: the fake used to derive
+	// the node from the machine record it already held, which hid the fact that
+	// nothing mapped a provider id to a device. See docs/firefly.md, "What a node
+	// is called".
+	forgotten map[string]bool
 
 	joinedCalls int
 	existsCalls int
 	forgetCalls int
+
+	// asked is every name these methods were handed, in order.
+	//
+	// The fake resolves a name against the cloud's own records, so it cannot notice
+	// a name that does not match the one the provider was told -- it would just
+	// answer "no such machine" for a machine that is running. A test compares this
+	// against Cloud.Specs(), which is the one join nothing else in the design makes
+	// checkable.
+	asked []string
 }
 
 // NewNetwork returns the network half, driven by the same clock as c.
 func NewNetwork(c *Cloud) *Network {
 	return &Network{
 		cloud:     c,
-		forgotten: make(map[firefly.MachineID]bool),
+		forgotten: make(map[string]bool),
 	}
 }
 
@@ -81,34 +95,37 @@ func (n *Network) ForgetRefuses(n2 int) *Network {
 // --- provider ------------------------------------------------------------
 
 // Joined reports a node that exists *and* whose machine is usable right now.
-func (n *Network) Joined(ctx context.Context, id firefly.MachineID) (bool, error) {
+func (n *Network) Joined(ctx context.Context, name string) (bool, error) {
 	n.cloud.mu.Lock()
 	defer n.cloud.mu.Unlock()
 	n.joinedCalls++
+	n.asked = append(n.asked, name)
 
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	return n.nodeExists(id) && n.machineUsable(id), nil
+	return n.nodeExists(name) && n.machineUsable(name), nil
 }
 
 // NodeExists reports a node record, whether or not its machine is still there.
-func (n *Network) NodeExists(ctx context.Context, id firefly.MachineID) (bool, error) {
+func (n *Network) NodeExists(ctx context.Context, name string) (bool, error) {
 	n.cloud.mu.Lock()
 	defer n.cloud.mu.Unlock()
 	n.existsCalls++
+	n.asked = append(n.asked, name)
 
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	return n.nodeExists(id), nil
+	return n.nodeExists(name), nil
 }
 
 // Forget removes the node record. A node that is already gone is not an error.
-func (n *Network) Forget(ctx context.Context, id firefly.MachineID) error {
+func (n *Network) Forget(ctx context.Context, name string) error {
 	n.cloud.mu.Lock()
 	defer n.cloud.mu.Unlock()
 	n.forgetCalls++
+	n.asked = append(n.asked, name)
 
 	if err := ctx.Err(); err != nil {
 		return err
@@ -120,8 +137,15 @@ func (n *Network) Forget(ctx context.Context, id firefly.MachineID) error {
 	// The tombstone is written whether or not a record existed yet. Without that,
 	// forgetting a machine that has not joined would do nothing, and a later
 	// NodeExists would report a node -- a repair that silently fails to repair.
-	n.forgotten[id] = true
+	n.forgotten[name] = true
 	return nil
+}
+
+// Asked reports every name the three methods were handed, in order.
+func (n *Network) Asked() []string {
+	n.cloud.mu.Lock()
+	defer n.cloud.mu.Unlock()
+	return append([]string(nil), n.asked...)
 }
 
 // Calls reports how many times each network method has been called.
@@ -144,11 +168,11 @@ func (n *Network) Calls() (joined, exists, forgets int) {
 // The node appears at readyAt+joinDelay, which means it only ever exists if the
 // machine was still there at that instant: deleting before boot, or during the
 // join delay, means no agent ever ran.
-func (n *Network) joinInstant(id firefly.MachineID) (time.Time, bool) {
+func (n *Network) joinInstant(name string) (time.Time, bool) {
 	if n.metadataMissing {
 		return time.Time{}, false
 	}
-	m, ok := n.cloud.mach[id]
+	m, ok := n.cloud.byName(name)
 	if !ok || m.readyAt.IsZero() {
 		return time.Time{}, false
 	}
@@ -166,11 +190,11 @@ func (n *Network) joinInstant(id firefly.MachineID) (time.Time, bool) {
 // nodeExists reports whether a record is present right now: it joined, its time
 // has come, and it has not been forgotten. It says nothing about the machine,
 // which may be long gone -- that is the point of the method.
-func (n *Network) nodeExists(id firefly.MachineID) bool {
-	if n.forgotten[id] {
+func (n *Network) nodeExists(name string) bool {
+	if n.forgotten[name] {
 		return false
 	}
-	at, ok := n.joinInstant(id)
+	at, ok := n.joinInstant(name)
 	if !ok {
 		return false
 	}
@@ -180,9 +204,9 @@ func (n *Network) nodeExists(id firefly.MachineID) bool {
 // machineUsable reports whether the machine exists and is running. A node that
 // outlives its machine is present but not joined, which is the distinction the
 // two methods exist to draw.
-func (n *Network) machineUsable(id firefly.MachineID) bool {
+func (n *Network) machineUsable(name string) bool {
 	c := n.cloud
-	m, ok := c.mach[id]
+	m, ok := c.byName(name)
 	if !ok || c.expired(m) {
 		return false
 	}

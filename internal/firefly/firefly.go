@@ -36,6 +36,10 @@ type Config struct {
 	// Label identifies this deployment's machines, as "key=value". It is how the
 	// orphan sweep tells our machines from someone else's, so a wrong label is
 	// how a design adopts a machine it did not create and then deletes it.
+	//
+	// It does one more job: the machine names firefly mints are prefixed from it,
+	// so that two deployments sharing one tailnet do not mint the same device name
+	// and so that a node says which deployment it belongs to. See name.go.
 	Label string
 
 	// MaxLifetime is the hard cap. No lease survives it, and it routes through a
@@ -88,6 +92,11 @@ type Firefly struct {
 	labelKey   string
 	labelValue string
 
+	// namePrefix is labelKey and labelValue sanitised into something a hostname
+	// may start with, parsed once at construction for the same reason as the
+	// label: Provision cannot fail there, so it must not branch there either.
+	namePrefix string
+
 	// The failed-create record. It is not in the document because a failed create
 	// leaves nothing to record: there is no machine, and the table's row is
 	// ABSENT --CreateFailed--> ABSENT. A restart retrying immediately is fine.
@@ -134,7 +143,7 @@ func New(cfg Config) (*Firefly, error) {
 	if !ok {
 		return nil, fmt.Errorf("%w: Label must be key=value, got %q", ErrConfig, cfg.Label)
 	}
-	return &Firefly{cfg: cfg, labelKey: key, labelValue: value}, nil
+	return &Firefly{cfg: cfg, labelKey: key, labelValue: value, namePrefix: namePrefixFor(key, value)}, nil
 }
 
 // Config returns the configuration, for reporting.
@@ -299,6 +308,7 @@ func (f *Firefly) Snapshot(ctx context.Context, now time.Time) (Snapshot, error)
 	for _, m := range f.doc.Machines {
 		status := MachineStatus{
 			ID:       m.ID,
+			Name:     m.Name,
 			State:    m.State,
 			Origin:   m.Origin,
 			Since:    m.Since,
@@ -322,7 +332,9 @@ type Snapshot struct {
 
 // MachineStatus is one machine's line in a snapshot.
 type MachineStatus struct {
-	ID     MachineID
+	ID   MachineID
+	Name string
+
 	State  State
 	Origin State
 	Since  time.Time
@@ -366,6 +378,14 @@ func (f *Firefly) mutate(ctx context.Context, fn func(doc *Document) error) erro
 
 // load reads the document once, translating an absent one into an empty document
 // of the current version.
+//
+// A document that does not validate is refused here rather than at the first save.
+// Saving a broken document loses the good one, and *loading* one silently makes
+// every later decision wrong — a version this binary does not understand, or a
+// machine with no name, would be acted on first and only rejected when the tick
+// tried to write the result back, by which point machines may have been deleted
+// on the strength of it. The store is the one place untrusted bytes arrive from,
+// so this is the boundary that checks them.
 func (f *Firefly) load(ctx context.Context) error {
 	if f.loaded {
 		return nil
@@ -377,6 +397,9 @@ func (f *Firefly) load(ctx context.Context) error {
 	case err != nil:
 		return err
 	default:
+		if err := doc.Validate(); err != nil {
+			return fmt.Errorf("firefly: loading the document: %w", err)
+		}
 		f.doc = doc
 	}
 	f.loaded = true

@@ -180,7 +180,7 @@ func TestNodeTruthTable(t *testing.T) {
 			build: func(t *testing.T, c *Cloud, n *Network) firefly.MachineID {
 				id := create(t, c)
 				c.Advance(time.Minute)
-				if err := n.Forget(ctx, id); err != nil {
+				if err := n.Forget(ctx, nameOf(t, c, id)); err != nil {
 					t.Fatalf("Forget: %v", err)
 				}
 				return id
@@ -196,7 +196,7 @@ func TestNodeTruthTable(t *testing.T) {
 					t.Fatalf("Delete: %v", err)
 				}
 				c.Advance(time.Hour)
-				if err := n.Forget(ctx, id); err != nil {
+				if err := n.Forget(ctx, nameOf(t, c, id)); err != nil {
 					t.Fatalf("Forget: %v", err)
 				}
 				return id
@@ -224,8 +224,9 @@ func TestNodeTruthTable(t *testing.T) {
 			}
 
 			id := tc.build(t, c, n)
+			name := nameOf(t, c, id)
 
-			gotExists, err := n.NodeExists(ctx, id)
+			gotExists, err := n.NodeExists(ctx, name)
 			if err != nil {
 				t.Fatalf("NodeExists: %v", err)
 			}
@@ -233,7 +234,7 @@ func TestNodeTruthTable(t *testing.T) {
 				t.Errorf("NodeExists = %v, want %v", gotExists, tc.wantExists)
 			}
 
-			gotJoined, err := n.Joined(ctx, id)
+			gotJoined, err := n.Joined(ctx, name)
 			if err != nil {
 				t.Fatalf("Joined: %v", err)
 			}
@@ -336,15 +337,16 @@ func TestNodeAnswersDoNotDependOnOrder(t *testing.T) {
 				if err != nil {
 					t.Fatalf("Create: %v", err)
 				}
+				name := nameOf(t, c, id)
 
 				ask := func() {
 					if !observe {
 						return
 					}
-					if _, err := n.NodeExists(ctx, id); err != nil {
+					if _, err := n.NodeExists(ctx, name); err != nil {
 						t.Fatalf("NodeExists: %v", err)
 					}
-					if _, err := n.Joined(ctx, id); err != nil {
+					if _, err := n.Joined(ctx, name); err != nil {
 						t.Fatalf("Joined: %v", err)
 					}
 				}
@@ -360,18 +362,18 @@ func TestNodeAnswersDoNotDependOnOrder(t *testing.T) {
 						}
 					}
 					if st.forget {
-						if err := n.Forget(ctx, id); err != nil {
+						if err := n.Forget(ctx, name); err != nil {
 							t.Fatalf("Forget: %v", err)
 						}
 					}
 					ask()
 				}
 
-				exists, err = n.NodeExists(ctx, id)
+				exists, err = n.NodeExists(ctx, name)
 				if err != nil {
 					t.Fatalf("NodeExists: %v", err)
 				}
-				joined, err = n.Joined(ctx, id)
+				joined, err = n.Joined(ctx, name)
 				if err != nil {
 					t.Fatalf("Joined: %v", err)
 				}

@@ -45,6 +45,7 @@ func seedMachine(t *testing.T, f *Firefly) MachineID {
 	id := machineID("m1")
 	doc.Machines = append(doc.Machines, Machine{
 		ID:        id,
+		Name:      "name-" + string(id),
 		State:     Ready,
 		CreatedAt: regBase,
 		Deadline:  regBase.Add(f.cfg.MaxLifetime),
@@ -355,7 +356,7 @@ func TestFailedSaveLeavesMemoryBehind(t *testing.T) {
 	doc := Document{
 		Version: DocumentVersion,
 		Machines: []Machine{{
-			ID: machineID("m1"), State: Ready, CreatedAt: regBase,
+			ID: machineID("m1"), Name: "name-m1", State: Ready, CreatedAt: regBase,
 			Deadline: regBase.Add(time.Hour), Since: regBase,
 		}},
 	}
@@ -644,6 +645,11 @@ func TestSnapshotReportsTheDeadline(t *testing.T) {
 	if got, want := snap.Machines[0].Deadline, regBase.Add(f.cfg.MaxLifetime); !got.Equal(want) {
 		t.Fatalf("Deadline = %s, want %s", got, want)
 	}
+	// The name is in the snapshot because it is what an operator types into a console
+	// or a tailnet to find the machine the id belongs to.
+	if got, want := snap.Machines[0].Name, "name-m1"; got != want {
+		t.Fatalf("Name = %q, want %q", got, want)
+	}
 }
 
 // --- stubs ---------------------------------------------------------------
@@ -664,9 +670,9 @@ func (stubCloud) Delete(context.Context, MachineID) error              { return 
 
 type stubNetwork struct{}
 
-func (stubNetwork) Joined(context.Context, MachineID) (bool, error)     { return false, nil }
-func (stubNetwork) NodeExists(context.Context, MachineID) (bool, error) { return false, nil }
-func (stubNetwork) Forget(context.Context, MachineID) error             { return nil }
+func (stubNetwork) Joined(context.Context, string) (bool, error)     { return false, nil }
+func (stubNetwork) NodeExists(context.Context, string) (bool, error) { return false, nil }
+func (stubNetwork) Forget(context.Context, string) error             { return nil }
 
 type stubSyncer struct{}
 
@@ -783,5 +789,75 @@ func TestRenewAfterPruningThroughATick(t *testing.T) {
 
 	if err := f.Renew(ctx, id, time.Hour, regBase.Add(3*time.Minute)); !errors.Is(err, ErrLeaseExpired) {
 		t.Fatalf("Renew after pruning = %v, want ErrLeaseExpired", err)
+	}
+}
+
+// lyingStore returns a document the caller chose, whatever was saved. It models a
+// store that hands back bytes this binary should not act on: a document from a
+// future version, or one that describes a world that could not exist.
+type lyingStore struct {
+	doc Document
+}
+
+func (s *lyingStore) Load(context.Context) (Document, error) { return s.doc, nil }
+func (s *lyingStore) Save(context.Context, Document) error   { return nil }
+
+// TestLoadRefusesADocumentThatDoesNotValidate.
+//
+// Validation on save is not enough on its own. A store is the one place untrusted
+// bytes arrive from — a stale object, a half-written one, a document from a
+// different build — and a tick that acted on one would walk machines through the
+// transition table, including the rows that delete them, and only fail when it tried
+// to write the result back.
+func TestLoadRefusesADocumentThatDoesNotValidate(t *testing.T) {
+	ctx := context.Background()
+
+	cases := []struct {
+		name    string
+		doc     Document
+		wantErr error // when set, the refusal must wrap this
+	}{
+		{
+			// The version bump in this change is only a compatibility gate if the load
+			// path enforces it.
+			name:    "bad/a_document_from_a_future_build",
+			doc:     Document{Version: DocumentVersion + 1},
+			wantErr: ErrDocumentVersion,
+		},
+		{
+			name: "bad/a_machine_with_no_name",
+			doc: Document{
+				Version: DocumentVersion,
+				Machines: []Machine{{
+					ID: machineID("m1"), State: Ready, CreatedAt: regBase,
+					Deadline: regBase.Add(time.Hour), Since: regBase,
+				}},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig(t)
+			cfg.Store = &lyingStore{doc: tc.doc}
+			f, err := New(cfg)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+
+			loadErr := f.Load(ctx)
+			if loadErr == nil {
+				t.Fatal("Load accepted a document that does not validate")
+			}
+			if tc.wantErr != nil && !errors.Is(loadErr, tc.wantErr) {
+				t.Fatalf("Load = %v, want %v", loadErr, tc.wantErr)
+			}
+
+			// The refusal has to be sticky: a load that failed must not leave a
+			// half-loaded document behind for the next call to act on.
+			if _, err := f.Snapshot(ctx, regBase); err == nil {
+				t.Fatal("Snapshot used a document that failed to load")
+			}
+		})
 	}
 }

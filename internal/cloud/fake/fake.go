@@ -53,11 +53,18 @@ type Cloud struct {
 	describes int
 	lists     int
 	deletes   int
+
+	// specs is every request Create has been handed, in order. It exists so a test
+	// can compare the name the provider was told with the name the network is later
+	// asked about: the fake derives nodes from its own records, so it cannot notice
+	// that the two disagree, and nothing else in the design joins them.
+	specs []firefly.Spec
 }
 
 type machine struct {
 	id        firefly.MachineID
 	spec      firefly.Spec
+	name      string
 	createdAt time.Time
 	readyAt   time.Time // zero means never: the boot never finishes
 	deleteAt  time.Time // zero means no delete has been requested
@@ -209,8 +216,26 @@ func (c *Cloud) Create(ctx context.Context, spec firefly.Spec) (firefly.MachineI
 
 	c.seq++
 	id := firefly.MachineID(fmt.Sprintf("fake-%03d", c.seq))
+
+	// A name is what the network knows the machine by, and the provider requires it
+	// to be unique within the project: a real create with a taken name fails with
+	// uniqueness_error. The fake models that rather than accepting it, because two
+	// machines sharing a name share one node record. A nameless request gets one
+	// minted here, which is what the real client does when a caller skips it.
+	name := spec.Name
+	if name == "" {
+		name = fmt.Sprintf("fake-name-%03d", c.seq)
+	}
+	for _, other := range c.mach {
+		if other.name == name && !c.expired(other) {
+			return "", fmt.Errorf("fake: the provider refused the create: name %q is taken", name)
+		}
+	}
+	spec.Name = name
+
 	m := &machine{
 		id:        id,
+		name:      name,
 		spec:      copySpec(spec),
 		createdAt: c.now,
 		publicIP:  fmt.Sprintf("10.0.0.%d", c.seq),
@@ -219,6 +244,7 @@ func (c *Cloud) Create(ctx context.Context, spec firefly.Spec) (firefly.MachineI
 		m.readyAt = c.now.Add(c.bootDelay)
 	}
 	c.mach[id] = m
+	c.specs = append(c.specs, copySpec(spec))
 	return id, nil
 }
 
@@ -358,6 +384,7 @@ func (c *Cloud) expired(m *machine) bool {
 func (m *machine) view(status firefly.ProviderStatus) firefly.CloudMachine {
 	return firefly.CloudMachine{
 		ID:        m.id,
+		Name:      m.name,
 		Status:    status,
 		Labels:    copyLabels(m.spec.Labels),
 		PublicIP:  m.publicIP,
@@ -378,6 +405,64 @@ func copyLabels(in map[string]string) map[string]string {
 	out := make(map[string]string, len(in))
 	for k, v := range in {
 		out[k] = v
+	}
+	return out
+}
+
+// byName returns the machine the network should reason about for a name.
+//
+// It prefers a live machine and falls back to the most recent dead one, because
+// the two callers want opposite halves of the same fact: joining is only ever true
+// for a machine that still exists, while a node record has to remain observable
+// after its machine is gone -- that lingering record is the whole reason Forget
+// exists. A name cannot be reused by a live machine while a live one holds it
+// (Create refuses that), so preferring the live one is unambiguous.
+//
+// It is called with the cloud's lock held, by the network half, which is why there
+// is no lock of its own.
+func (c *Cloud) byName(name string) (*machine, bool) {
+	var dead *machine
+	for _, m := range c.mach {
+		if m.name != name {
+			continue
+		}
+		if !c.expired(m) {
+			return m, true
+		}
+		if dead == nil || m.createdAt.After(dead.createdAt) {
+			dead = m
+		}
+	}
+	if dead != nil {
+		return dead, true
+	}
+	return nil, false
+}
+
+// Name reports the name the provider gave a machine, whether or not it still
+// exists.
+//
+// It is not part of the Cloud interface: firefly learns a machine's name from its
+// own record, and from the listing when it adopts one, never by looking it up
+// again. It is here because a test that holds only an id cannot ask the network
+// anything -- which is the whole point of the rekey.
+func (c *Cloud) Name(id firefly.MachineID) (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	m, ok := c.mach[id]
+	if !ok {
+		return "", false
+	}
+	return m.name, true
+}
+
+// Specs reports every request Create has been handed, in order.
+func (c *Cloud) Specs() []firefly.Spec {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]firefly.Spec, len(c.specs))
+	for i, s := range c.specs {
+		out[i] = copySpec(s)
 	}
 	return out
 }

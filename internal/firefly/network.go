@@ -11,22 +11,30 @@ import "context"
 // quietly. One interface per fact keeps each side's failure honest.
 //
 // Like Cloud, everything here is a request the loop makes. Nothing is pushed.
+//
+// Every method is keyed on the machine's *name*, not its provider id. A mesh
+// knows devices by name and the provider knows machines by an id it mints at
+// creation; asking a tailnet about "hetzner:42" is a question it cannot answer.
+// So firefly mints the name at provisioning time, records it on the Machine, and
+// the provider is told the same name at creation — which is why a node needs no
+// cooperation from the machine to be matchable. See docs/firefly.md, "What a
+// node is called".
 type Network interface {
-	// Joined reports whether a node exists for the machine *and* the machine is
-	// usable right now: present, and running.
+	// Joined reports whether a node exists for the named machine *and* the
+	// machine is usable right now: present, and running.
 	//
 	// It is the second half of READY. A machine that answers its metadata service
 	// and never joins is not ready, and a node that lingers after its machine is
 	// gone is not joined, however present the record is.
-	Joined(ctx context.Context, id MachineID) (bool, error)
+	Joined(ctx context.Context, name string) (bool, error)
 
-	// NodeExists reports whether a node record exists for the machine, whether or
-	// not the machine does.
+	// NodeExists reports whether a node record exists for the named machine,
+	// whether or not the machine does.
 	//
 	// This is the second half of deletion: a machine can be gone from the provider
 	// and still be a member of the network. Only when this returns false, after a
 	// Forget if one was needed, may a machine reach ABSENT.
-	NodeExists(ctx context.Context, id MachineID) (bool, error)
+	NodeExists(ctx context.Context, name string) (bool, error)
 
 	// Forget removes a node record.
 	//
@@ -36,5 +44,5 @@ type Network interface {
 	//
 	// It is idempotent. Forgetting something that is already gone returns nil,
 	// because the caller cannot tell that from success and should not try.
-	Forget(ctx context.Context, id MachineID) error
+	Forget(ctx context.Context, name string) error
 }
