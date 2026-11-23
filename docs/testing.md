@@ -49,6 +49,9 @@ internal/
     fake_test.go              one case per fault, plus the lifecycle
     network_test.go           joining, lingering nodes, forget refusals
     node_truth_test.go        NodeExists as a truth table, and order-independence
+  config/
+    config.go                 flags and environment into one validated Config
+    config_test.go            defaults, rejections, and that a Secret never prints
   cloudinit/
     render.go                 the boot script: name, mesh address, enrolment key
     render_test.go            the document as a whole, and hostile values
