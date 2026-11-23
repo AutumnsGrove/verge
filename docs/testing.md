@@ -50,8 +50,8 @@ internal/
     network_test.go           joining, lingering nodes, forget refusals
     node_truth_test.go        NodeExists as a truth table, and order-independence
   store/r2/
-    store.go                  the state document in object storage
-    store_test.go
+    store.go                  the state document in object storage, one object
+    store_test.go             round trip, absent vs broken, against a real S3 client
   net/tailnet/
     client.go                 the real Network: observe, forget (joining is cloud-init)
     client_test.go            against httptest: the two facts, ambiguity, idempotent forget
@@ -176,6 +176,28 @@ unanswerable before the rekey. So the fake records both halves (`Cloud.Specs()` 
 request, `Network.Asked()` is every name the three methods were handed) and one test compares them.
 That is `TestNamesJoinTheProviderAndTheNetwork`, and it is the shape to reach for whenever two
 interfaces are joined by a value neither of them mints.
+
+### The R2 store
+
+The third real client, and the first with a dependency that is not the standard library: `aws-sdk-go-v2`
+does the S3 protocol and SigV4 signing, and the store is two calls over it. The tests keep the seam
+honest by signing real requests — a real `s3.Client` pointed at `httptest` with path-style URLs — so
+there is no mocked API object anywhere.
+
+Three distinctions the httptest tier has to make, because each one is a different data-loss bug if it is
+collapsed into the others:
+
+- **absent** is a `NoSuchKey`, and is `ErrNoDocument`: a fresh deployment, not a failure;
+- **absent bucket** is an error, not an absent document — a missing bucket is a torn-down or never-created
+  deployment, and calling it "no document yet" hides a misconfiguration behind the first-run path;
+- **a body that will not decode** is an error, not an absent document: an empty or truncated object is a
+  write that did not arrive, and reading it as "nothing saved yet" is how a restart adopts nothing and
+  then deletes everything.
+
+`TestStoreIsUsableByFirefly` drives the store through `firefly.Store` itself: provision on one `Firefly`,
+snapshot from a second one built over the same store, and assert the machine — and its **name** — came
+back. That is the package's whole reason for existing, and it is the one assertion that would catch a
+store which round-trips everything except the field the rekey added.
 
 ### The tailnet client
 
