@@ -630,6 +630,15 @@ Three rules fell out of writing it, and each is a test rather than a comment:
 - **The counter skips a name the document already holds.** A lost document restarts the
   sequence at zero while the machines it lost are being adopted, and the second mint must
   walk past the first one rather than collide with it.
+- **A failed create still spends its name.** The provider enforces uniqueness across the
+  whole *project*, while the document and the label-filtered listing only ever know this
+  deployment's machines — so a create can be refused for a name nothing here can see is
+  taken, and a counter that advanced only on success would ask for that same name on every
+  retry until the end of the process. Spending the name on failure costs a gap in the
+  sequence when the failure was transient instead, and gaps cost nothing: a name tells
+  machines apart, it does not count them. The counter is saved with the failure, so a
+  restart does not rediscover the refused name; only a save that also failed leaves it
+  ahead of the store, and the backoff bounds that.
 - **A name is unique in the document and the document is validated on it.** Two machines
   sharing a name share one node record: deleting either would look like deleting both. A
   caller-supplied name that is already taken is refused *before* the create, since a create

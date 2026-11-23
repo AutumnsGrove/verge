@@ -378,6 +378,14 @@ func (f *Firefly) mutate(ctx context.Context, fn func(doc *Document) error) erro
 
 // load reads the document once, translating an absent one into an empty document
 // of the current version.
+//
+// A document that does not validate is refused here rather than at the first save.
+// Saving a broken document loses the good one, and *loading* one silently makes
+// every later decision wrong — a version this binary does not understand, or a
+// machine with no name, would be acted on first and only rejected when the tick
+// tried to write the result back, by which point machines may have been deleted
+// on the strength of it. The store is the one place untrusted bytes arrive from,
+// so this is the boundary that checks them.
 func (f *Firefly) load(ctx context.Context) error {
 	if f.loaded {
 		return nil
@@ -389,6 +397,9 @@ func (f *Firefly) load(ctx context.Context) error {
 	case err != nil:
 		return err
 	default:
+		if err := doc.Validate(); err != nil {
+			return fmt.Errorf("firefly: loading the document: %w", err)
+		}
 		f.doc = doc
 	}
 	f.loaded = true

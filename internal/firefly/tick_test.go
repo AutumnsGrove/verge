@@ -853,7 +853,7 @@ func TestProvision(t *testing.T) {
 		t.Fatal("a caller-supplied label overrode ours and hid the machine")
 	})
 
-	t.Run("sad/failed_create_records_nothing", func(t *testing.T) {
+	t.Run("sad/failed_create_records_no_machine", func(t *testing.T) {
 		boom := errors.New("quota exceeded")
 		h := newHarness(t, func(c *fake.Cloud, _ *fake.Network) { c.FailCreate(boom) })
 
@@ -861,10 +861,86 @@ func TestProvision(t *testing.T) {
 			t.Fatalf("Provision = %v, want the provider's error", err)
 		}
 		doc, err := h.store.Load(ctx)
-		if !errors.Is(err, firefly.ErrNoDocument) {
-			t.Fatalf("a failed create wrote a document: %v", err)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
 		}
-		_ = doc
+		if len(doc.Machines) != 0 {
+			t.Fatalf("a failed create recorded %d machines: %+v", len(doc.Machines), doc.Machines)
+		}
+		// The name it tried is spent, though, and that is deliberate: see the
+		// collision case below. A counter that only moved on success would mint the
+		// same name forever if the provider refused it.
+		if doc.NextMachineNumber != 1 {
+			t.Fatalf("NextMachineNumber = %d after a failed create, want 1", doc.NextMachineNumber)
+		}
+	})
+
+	// A machine in the same project, carrying another deployment's label, whose
+	// name is the one our counter is about to mint. The API enforces uniqueness
+	// across the whole project, so Create is refused; our listing never sees the
+	// machine, so nothing else in the design knows the name is taken. A counter that
+	// advanced only on success would retry the same refused name until the heat
+	// death of the process.
+	t.Run("sad/a_name_the_provider_refuses_is_not_retried", func(t *testing.T) {
+		h := newHarness(t)
+		if _, err := h.cloud.Create(ctx, firefly.Spec{
+			Name:   "verge-machine-1",
+			Labels: map[string]string{"verge": "someone-else"},
+		}); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+
+		if _, err := h.f.Provision(ctx, firefly.Spec{}, at(0)); err == nil {
+			t.Fatal("the create was accepted for a name the provider already had")
+		}
+
+		// Retried on the same firefly, past RetryBase: this time the mint has to walk
+		// past the refused name rather than ask for it again.
+		id, err := h.f.Provision(ctx, firefly.Spec{}, at(30*time.Second))
+		if err != nil {
+			t.Fatalf("the retry was refused too: %v", err)
+		}
+		doc, err := h.store.Load(ctx)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		m, ok := doc.Machine(id)
+		if !ok {
+			t.Fatal("the machine was created but not recorded")
+		}
+		if m.Name != "verge-machine-2" {
+			t.Fatalf("the retry minted %q, want verge-machine-2", m.Name)
+		}
+	})
+
+	// The same wedge, through a restart: the spent name has to be on disk, or a new
+	// process starts the sequence again and asks for the name that was just refused.
+	t.Run("sad/the_spent_name_survives_a_restart", func(t *testing.T) {
+		h := newHarness(t)
+		if _, err := h.cloud.Create(ctx, firefly.Spec{
+			Name:   "verge-machine-1",
+			Labels: map[string]string{"verge": "someone-else"},
+		}); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if _, err := h.f.Provision(ctx, firefly.Spec{}, at(0)); err == nil {
+			t.Fatal("the create was accepted for a name the provider already had")
+		}
+
+		restarted, err := firefly.New(h.f.Config())
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		h.f = restarted
+
+		id, err := h.f.Provision(ctx, firefly.Spec{}, at(30*time.Second))
+		if err != nil {
+			t.Fatalf("the retry after a restart was refused: %v", err)
+		}
+		doc, _ := h.store.Load(ctx)
+		if m, _ := doc.Machine(id); m.Name != "verge-machine-2" {
+			t.Fatalf("the retry minted %q, want verge-machine-2", m.Name)
+		}
 	})
 
 	t.Run("sad/second_attempt_backs_off", func(t *testing.T) {

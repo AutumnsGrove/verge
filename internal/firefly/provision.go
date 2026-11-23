@@ -34,6 +34,11 @@ var ErrNameTaken = errors.New("firefly: a machine with that name already exists"
 // The returned id is set even when an error is returned if the machine was
 // created but could not be recorded. That is deliberate: the caller has to know
 // there is a machine to clean up, and the next Tick adopts it as an orphan.
+//
+// A failed create still spends its name. The provider enforces uniqueness across
+// the whole project while the document only knows this deployment's machines, so a
+// name can be refused for a reason nothing here can see — and a counter that only
+// moved on success would ask for that name again on every retry, forever.
 func (f *Firefly) Provision(ctx context.Context, spec Spec, now time.Time) (MachineID, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -77,6 +82,27 @@ func (f *Firefly) Provision(ctx context.Context, spec Spec, now time.Time) (Mach
 		f.createFailures++
 		f.createRetryAt = now.Add(f.retryDelay(f.createFailures))
 		f.createErr = err
+
+		// The name is spent even though the machine is not.
+		//
+		// A create can fail because the provider refuses a name this deployment
+		// cannot see it holds: names are unique across the whole project, while the
+		// document and the label-filtered listing only ever know about our own
+		// machines. A counter that advanced only on success would mint that same
+		// refused name on every attempt, back off forever, and never reach a name it
+		// was allowed to use. Advancing here costs a gap in the sequence when the
+		// failure was transient instead, and a gap costs nothing: names are for
+		// telling machines apart, not for counting them.
+		//
+		// It is saved as well as advanced, so a restart retries past the refused name
+		// rather than rediscovering it. A save that fails here leaves the in-memory
+		// counter ahead of the store, which is the same shape as every other failed
+		// save in this package: the next attempt in this process is correct, and a
+		// restart is bounded by the same backoff.
+		f.doc = next
+		if saveErr := f.save(ctx, next); saveErr != nil {
+			return "", fmt.Errorf("firefly: provisioning: %w", errors.Join(err, saveErr))
+		}
 		return "", fmt.Errorf("firefly: provisioning: %w", err)
 	}
 	f.createFailures = 0

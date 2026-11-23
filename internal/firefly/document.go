@@ -106,7 +106,8 @@ type Document struct {
 // migration and no version 1 document in the world: the network was keyed on the
 // provider id when 1 was written, so a 1 is not a document this binary can act
 // on, and refusing it is more honest than adopting machines whose nodes nothing
-// can name.
+// can name. The refusal happens on the way in — Firefly.load validates, which is
+// the only place untrusted bytes arrive from — and again on the way out.
 const DocumentVersion = 2
 
 // Lease errors that a document can be wrong about. They are distinct from the
@@ -125,9 +126,10 @@ var (
 //
 // It runs on Save and on Load, because the two failures it prevents are
 // different and both expensive: saving a broken document loses the good one,
-// and loading one silently makes every later decision wrong. A document that
-// has been through Validate can be trusted to describe a world that could
-// exist.
+// and loading one silently makes every later decision wrong — a tick would walk
+// machines through the transition table, including the rows that delete them, and
+// only find out when it tried to write the result back. A document that has been
+// through Validate can be trusted to describe a world that could exist.
 func (d Document) Validate() error {
 	if d.Version != DocumentVersion {
 		return fmt.Errorf("%w: got %d, want %d", ErrDocumentVersion, d.Version, DocumentVersion)
