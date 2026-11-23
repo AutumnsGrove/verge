@@ -81,10 +81,12 @@ func WithHTTPClient(h *http.Client) Option { return func(c *Client) { c.http = h
 
 // New returns a client for token.
 //
-// The token is a control-plane credential: it can read the tailnet and delete
-// devices from it. Nothing in this package puts it anywhere near a machine, and the
-// thing a machine does get — an ephemeral enrolment key — grants membership and
-// nothing else. That distinction is the same one the whole design rests on.
+// The token is a control-plane credential: it reads the tailnet, deletes devices from it,
+// and mints enrolment keys. An OAuth client therefore needs the `devices:core` and
+// `auth_keys` scopes; an API key owned by a user with access to the tailnet carries them
+// already. Nothing in this package puts it anywhere near a machine, and the thing a
+// machine does get — an ephemeral enrolment key — grants membership and nothing else.
+// That distinction is the same one the whole design rests on.
 func New(token string, opts ...Option) *Client {
 	c := &Client{
 		token:   token,
@@ -209,7 +211,7 @@ func (c *Client) Forget(ctx context.Context, name string) error {
 		return fmt.Errorf("tailnet: the device named %q has no id to delete", name)
 	}
 
-	err = c.do(ctx, http.MethodDelete, "/device/"+url.PathEscape(id), nil)
+	err = c.do(ctx, http.MethodDelete, "/device/"+url.PathEscape(id), nil, nil)
 	if err != nil && isNotFound(err) {
 		// Raced with an ephemeral node disappearing on its own. Same outcome.
 		return nil
@@ -235,7 +237,7 @@ func (c *Client) find(ctx context.Context, name string) (apiDevice, bool, error)
 	var out struct {
 		Devices []apiDevice `json:"devices"`
 	}
-	if err := c.do(ctx, http.MethodGet, "/tailnet/"+url.PathEscape(c.tailnet)+"/devices", &out); err != nil {
+	if err := c.do(ctx, http.MethodGet, "/tailnet/"+url.PathEscape(c.tailnet)+"/devices", nil, &out); err != nil {
 		return apiDevice{}, false, err
 	}
 
@@ -279,13 +281,16 @@ func deviceID(d apiDevice) string {
 
 // --- plumbing ------------------------------------------------------------
 
-func (c *Client) do(ctx context.Context, method, path string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, nil)
+func (c *Client) do(ctx context.Context, method, path string, body io.Reader, out any) error {
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
 	if err != nil {
 		return fmt.Errorf("tailnet: building the request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Accept", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 
 	resp, err := c.http.Do(req)
 	if err != nil {

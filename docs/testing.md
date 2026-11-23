@@ -59,6 +59,8 @@ internal/
   net/tailnet/
     client.go                 the real Network: observe, forget (joining is cloud-init)
     client_test.go            against httptest: the two facts, ambiguity, idempotent forget
+    key.go                    the enrolment key: ephemeral, single-use, preauthorized
+    key_test.go               the request it sends, and the rendering it feeds
     contract_test.go          //go:build contract — a real tailnet key (not written)
   rpc/relay/
     relay.go                  the pi JSONL reader
@@ -254,6 +256,17 @@ server will happily let you get wrong:
 
 `Forget` is idempotent twice over: a name with no device issues no request at all, and a delete that
 races an ephemeral node away is a 404, which is success for the same reason it is on the provider side.
+
+The same package mints the **enrolment key**, and three of its four capabilities are asserted as literals
+rather than left to a caller: ephemeral, single-use, preauthorized. Two request-level facts are pinned by
+tests because both are silent failures rather than errors: the expiry is whole seconds and **zero means
+no expiry at all**, so a sub-second TTL is refused instead of truncated; and the description has a
+50-byte cap, so a firefly-minted name of 63 characters is shortened from the front, keeping the counter
+that tells two machines of one deployment apart. Each one is load-bearing elsewhere —
+ephemeral is what makes `NodeExists` self-clearing, single-use is what stops a key escaping the machine
+it was written for, preauthorized is what stops a device waiting for a human and looking like a failed
+boot. `TestMintKeyFitsTheRenderer` renders a minted key through `cloudinit.Render`, which is the one
+join neither package can check on its own.
 
 ## The clock
 
