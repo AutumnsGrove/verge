@@ -53,8 +53,9 @@ internal/
     store.go                  the state document in object storage
     store_test.go
   net/tailnet/
-    client.go                 the real Network: join, observe, forget
-    client_test.go
+    client.go                 the real Network: observe, forget (joining is cloud-init)
+    client_test.go            against httptest: the two facts, ambiguity, idempotent forget
+    contract_test.go          //go:build contract — a real tailnet key (not written)
   rpc/relay/
     relay.go                  the pi JSONL reader
     relay_test.go
@@ -175,6 +176,23 @@ unanswerable before the rekey. So the fake records both halves (`Cloud.Specs()` 
 request, `Network.Asked()` is every name the three methods were handed) and one test compares them.
 That is `TestNamesJoinTheProviderAndTheNetwork`, and it is the shape to reach for whenever two
 interfaces are joined by a value neither of them mints.
+
+### The tailnet client
+
+The second real client, and the one that tests the *interface* rather than a schema: `Joined` is
+`authorized && connectedToControl`, `NodeExists` is "the device is there", and every method lists once
+because the API has no lookup by name. Three of its cases exist because they are the ones an httptest
+server will happily let you get wrong:
+
+- a device that is registered and not connected, or registered and not authorized, is `NodeExists`
+  true and `Joined` false — the pair the two methods exist to separate;
+- two devices sharing a hostname is `ErrAmbiguousNode` from all three methods, because every tie-break
+  is wrong in a way that either marks a machine ready or deletes someone else's node;
+- a failing tailnet is an error and never an empty one, because `false` from a listing that did not
+  happen is how a machine that never joined gets confirmed gone.
+
+`Forget` is idempotent twice over: a name with no device issues no request at all, and a delete that
+races an ephemeral node away is a 404, which is success for the same reason it is on the provider side.
 
 ## The clock
 
