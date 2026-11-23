@@ -1,0 +1,4 @@
+go test fuzz v1
+string("a\xffb")
+string("https://control.example.ts.net")
+string("tskey-auth-k1-abc")

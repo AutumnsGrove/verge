@@ -49,6 +49,10 @@ internal/
     fake_test.go              one case per fault, plus the lifecycle
     network_test.go           joining, lingering nodes, forget refusals
     node_truth_test.go        NodeExists as a truth table, and order-independence
+  cloudinit/
+    render.go                 the boot script: name, mesh address, enrolment key
+    render_test.go            the document as a whole, and hostile values
+    render_fuzz_test.go       FuzzCloudInit — the highest-value security target
   store/r2/
     store.go                  the state document in object storage, one object
     store_test.go             round trip, absent vs broken, against a real S3 client
@@ -177,6 +181,41 @@ request, `Network.Asked()` is every name the three methods were handed) and one 
 That is `TestNamesJoinTheProviderAndTheNetwork`, and it is the shape to reach for whenever two
 interfaces are joined by a value neither of them mints.
 
+### The cloud-init renderer
+
+The most privileged bytes this system writes: a script that runs as root at boot. Four decisions, each of
+which is cheaper to read than to rediscover:
+
+- **No text template.** The document is a struct marshalled by `yaml.v3`, because a template is a parser
+  on both sides of a trust boundary. The fuzz target therefore attacks the *encoder's* escaping, which is
+  a much smaller thing to be wrong about than a quoting scheme someone wrote by hand.
+- **Every string is emitted double-quoted**, and that is not decoration. Left alone, the encoder writes a
+  multi-line string as a block scalar, which is lossy for values that begin or end with whitespace: a
+  hostname of exactly `"\n"` renders as an empty scalar, and `"\na"` loses its leading newline. The
+  fuzzer found that on its second run. A hostname that leaves this package different from the one the
+  network will be asked about is a machine nothing can find, so the style is pinned rather than trusted.
+- **Invalid UTF-8 is refused, not coerced.** Both `encoding/json` and the YAML encoder rewrite it as
+  U+FFFD. A silently mangled enrolment key is a machine that boots, fails to join and says nothing; a
+  mangled name is invisible. `Render` returns `ErrSpec` instead. The fuzzer found this one too — the
+  first seed it tried.
+- **The renderer is not a hostname validator.** It guarantees escaping, and the provider guarantees
+  validity by refusing the create. Two validators would be two things to keep in step, and a name that
+  is refused here has no create to be refused by.
+- **There is no `preserve_hostname` key**, and the first version of this package had one. cloud-init
+  returns early from `cc_set_hostname` and `cc_update_hostname` when that flag is true — before it reads
+  the `hostname` key or the datasource metadata — so setting it does not preserve the name, it stops the
+  document naming the machine at all. The machine keeps the image's default hostname, joins the tailnet
+  under it, and the network is never asked about a name that exists: the exact failure this package
+  exists to prevent, caused by a key that looked like hardening. The flag is gone from the struct so it
+  cannot come back, and `TestRender` asserts the key set exactly — a document that grows a key without a
+  review is a document a machine executes. A distribution that later renames itself over DHCP is an image
+  problem (netplan's `dhcp4-overrides`), because cloud-init only acts at boot.
+
+`FuzzCloudInit` asserts the strong property: every accepted input parses back byte for byte, the document
+contains exactly one `write_files` entry and one `runcmd`, and no input can become structure. Seeds on
+every PR, and both minimised inputs the fuzzer found — a newline-only hostname and an invalid-UTF-8 one —
+are committed under `testdata/fuzz/FuzzCloudInit/`.
+
 ### The R2 store
 
 The third real client, and the first with a dependency that is not the standard library: `aws-sdk-go-v2`
@@ -259,7 +298,7 @@ Native `testing.F`, corpus committed under `testdata/fuzz/`, seeds replayed on e
 | Target | Why |
 |---|---|
 | `FuzzRelay` | pi's stream is LF-framed with explicit warnings about Unicode separators, backpressure, and partial UTF-8. This is the boundary most likely to eat a real session. |
-| `FuzzTemplate` | cloud-init inputs render into YAML that runs as root at boot. A newline in a repo URL is remote code execution. This is a security test with a fuzzer attached. |
+| `FuzzCloudInit` | cloud-init facts render into YAML that runs as root at boot. A newline in a name is a machine nothing can find. This is a security test with a fuzzer attached. |
 | `FuzzStream` | SSE chunk boundaries, `\r` handling, a chunk after close, malformed usage. |
 | `FuzzPatch` | patches are generated from a hostile tree and applied on a fresh machine. Binary content, CRLF, path escape. |
 | `FuzzHetznerDecode` | truncated and mutated JSON from the provider. Cheap; it is nearly free once the harness exists. |
