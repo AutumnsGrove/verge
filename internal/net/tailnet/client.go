@@ -7,6 +7,16 @@
 // would be a second source of truth for it. So this client only ever asks and
 // repairs: is the node there, is it usable, make it go away.
 //
+// One assumption is load-bearing and is not enforced here: a node must join under
+// the name firefly minted for its machine. This package matches a device by its
+// hostname (falling back to the first label of its MagicDNS name), because that is
+// the only name a tailnet knows — so a machine that joins under the image's default
+// hostname is a machine nothing will ever find, and it will sit `PROVISIONING` until
+// the boot deadline destroys it. The requirement is the *renderer's*: the script must
+// set the hostname to firefly.Spec.Name, and the enrolment key must be
+// `preauthorized` or the device waits for a human. Both belong to that PR, and this
+// is the sentence to check it against.
+//
 // Everything here is request/response against an injected *http.Client, so the unit
 // tier runs against httptest and the contract tier swaps in a real API token behind
 // a build tag. No method retries: retrying is firefly's job, done from the document,
@@ -63,8 +73,9 @@ func WithTailnet(name string) Option {
 	}
 }
 
-// WithHTTPClient injects the transport. It is how a test asserts the timeout, and
-// how the contract tier adds instrumentation without a second client.
+// WithHTTPClient injects the transport. It is how the contract tier adds
+// instrumentation without a second client, and how a caller running inside its own
+// deadline shortens the timeout below the default.
 func WithHTTPClient(h *http.Client) Option { return func(c *Client) { c.http = h } }
 
 // New returns a client for token.

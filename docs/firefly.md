@@ -683,6 +683,16 @@ node belonging to a machine firefly did not create. It is the symptom of two dep
 same name into one tailnet — exactly what the label-derived name prefix exists to prevent — and it is a
 configuration a human has to look at.
 
+**One assumption is load-bearing and belongs to a different PR.** The client matches a device by its
+hostname, because that is the only name a tailnet knows. So a machine must join under the name firefly
+minted for it: the rendered cloud-init has to set the hostname to `Spec.Name`, and the enrolment key has
+to be `preauthorized` or the device waits for a human. Neither the cloud-init renderer nor the key
+minter exists yet, so nothing in the tree enforces either — and the failure mode is quiet in the wrong
+way: a machine that joins under the image's default hostname is a machine nothing can find, so it sits
+`PROVISIONING` until `BootDeadline` destroys it and is reprovisioned into the same hole. The
+requirement is written here and in the package doc so the renderer PR has something to be checked
+against rather than something to rediscover.
+
 Two smaller consequences worth naming because they are the sort of thing a reviewer should not have to
 rediscover:
 

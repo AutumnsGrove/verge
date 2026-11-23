@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/AutumnsGrove/verge/internal/firefly"
 )
@@ -430,4 +431,24 @@ func TestNotFoundIsRecognised(t *testing.T) {
 // because the interface is what the package exists for.
 func TestClientSatisfiesFirefly(t *testing.T) {
 	var _ firefly.Network = New(token)
+}
+
+// TestTimeouts keeps the one property of the transport that is a decision: a control
+// plane that stops answering must not hold a tick open, and a caller with its own
+// deadline must be able to shorten it.
+func TestTimeouts(t *testing.T) {
+	t.Run("happy/the_default_is_a_timeout_not_an_infinite_wait", func(t *testing.T) {
+		c := New(token)
+		if c.http.Timeout != 30*time.Second {
+			t.Fatalf("timeout = %s, want 30s", c.http.Timeout)
+		}
+	})
+
+	t.Run("happy/an_injected_transport_replaces_the_default", func(t *testing.T) {
+		injected := &http.Client{Timeout: time.Second}
+		c := New(token, WithHTTPClient(injected))
+		if c.http != injected {
+			t.Fatal("WithHTTPClient did not take")
+		}
+	})
 }
