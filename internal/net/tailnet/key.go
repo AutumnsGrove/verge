@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+	"unicode/utf8"
 )
 
 // Enrolment keys.
@@ -92,11 +93,22 @@ type Key struct {
 func describedName(name string) string {
 	const prefix = "verge "
 	budget := MaxDescription - len(prefix)
-	if len(name) > budget {
-		// "…" is three bytes, so it has to come out of the budget.
-		name = "…" + name[len(name)-(budget-3):]
+	if len(name) <= budget {
+		return prefix + name
 	}
-	return prefix + name
+
+	// "…" is three bytes, so it comes out of the budget.
+	tail := name[len(name)-(budget-3):]
+	// The budget is in bytes and the name is not necessarily ASCII, so a byte offset can
+	// land in the middle of a rune. That would be invalid UTF-8, and encoding/json
+	// replaces each broken byte with U+FFFD — three bytes for one — which grows the
+	// description back over the limit this function exists to stay under. Backing up to
+	// the next rune boundary keeps the arithmetic exact and the name readable; shortening
+	// it by up to three bytes costs nothing.
+	for len(tail) > 0 && !utf8.RuneStart(tail[0]) {
+		tail = tail[1:]
+	}
+	return prefix + "…" + tail
 }
 
 // MintKey requests a single-use ephemeral enrolment key for the named machine.
@@ -108,6 +120,12 @@ func (c *Client) MintKey(ctx context.Context, name string, ttl time.Duration) (K
 	switch {
 	case name == "":
 		return Key{}, fmt.Errorf("%w: no machine name", ErrKeyRequest)
+	case !utf8.ValidString(name):
+		// encoding/json rewrites invalid UTF-8 as U+FFFD, which for a description is a
+		// mangled name and up to three bytes per broken byte — enough to break the length
+		// budget above, and enough to make a log line unreadable. A name that is not text
+		// is not a hostname either.
+		return Key{}, fmt.Errorf("%w: the machine name is not valid UTF-8", ErrKeyRequest)
 	case ttl < MinKeyTTL:
 		// Not merely "too short": the wire value is whole seconds and zero means never
 		// expires, so this is the difference between a key that lapses in a minute and

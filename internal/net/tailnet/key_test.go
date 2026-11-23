@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/AutumnsGrove/verge/internal/cloudinit"
 )
@@ -216,6 +217,44 @@ func TestMintKey(t *testing.T) {
 		}
 		if len(first) > MaxDescription || len(second) > MaxDescription {
 			t.Fatalf("descriptions are %d and %d bytes", len(first), len(second))
+		}
+	})
+
+	// The budget is in bytes and a name is not necessarily ASCII, so the cut has to land
+	// on a rune boundary: a split rune is invalid UTF-8, and encoding/json replaces it
+	// with U+FFFD — three bytes for one — which puts the description back over the limit
+	// that keeps the request from being refused.
+	t.Run("bad/a_multibyte_name_is_shortened_without_splitting_a_rune", func(t *testing.T) {
+		name := strings.Repeat("é", 30) // 60 bytes, no ASCII to fall back on
+		got := describedName(name)
+
+		if !utf8.ValidString(got) {
+			t.Fatalf("the description is not valid UTF-8: %q", got)
+		}
+		if len(got) > MaxDescription {
+			t.Fatalf("the description is %d bytes: %q", len(got), got)
+		}
+
+		// The wire value is the marshalled one, so that is what has to fit.
+		raw, err := json.Marshal(map[string]any{"description": got})
+		if err != nil {
+			t.Fatalf("encoding the description: %v", err)
+		}
+		var back struct {
+			Description string `json:"description"`
+		}
+		if err := json.Unmarshal(raw, &back); err != nil {
+			t.Fatalf("decoding: %v", err)
+		}
+		if back.Description != got {
+			t.Fatalf("the description did not survive encoding: %q -> %q", got, back.Description)
+		}
+	})
+
+	t.Run("bad/a_name_that_is_not_utf8_is_refused", func(t *testing.T) {
+		c, _ := newMinter(t, http.StatusOK, `{"key":"tskey-auth-k1-abc"}`)
+		if _, err := c.MintKey(ctx, "verge\xff-machine", time.Minute); !errors.Is(err, ErrKeyRequest) {
+			t.Fatalf("MintKey with invalid UTF-8 = %v, want ErrKeyRequest", err)
 		}
 	})
 
