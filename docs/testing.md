@@ -258,7 +258,11 @@ server will happily let you get wrong:
 races an ephemeral node away is a 404, which is success for the same reason it is on the provider side.
 
 The same package mints the **enrolment key**, and three of its four capabilities are asserted as literals
-rather than left to a caller: ephemeral, single-use, preauthorized. Each one is load-bearing elsewhere —
+rather than left to a caller: ephemeral, single-use, preauthorized. Two request-level facts are pinned by
+tests because both are silent failures rather than errors: the expiry is whole seconds and **zero means
+no expiry at all**, so a sub-second TTL is refused instead of truncated; and the description has a
+50-byte cap, so a firefly-minted name of 63 characters is shortened from the front, keeping the counter
+that tells two machines of one deployment apart. Each one is load-bearing elsewhere —
 ephemeral is what makes `NodeExists` self-clearing, single-use is what stops a key escaping the machine
 it was written for, preauthorized is what stops a device waiting for a human and looking like a failed
 boot. `TestMintKeyFitsTheRenderer` renders a minted key through `cloudinit.Render`, which is the one

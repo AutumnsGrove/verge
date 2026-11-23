@@ -34,6 +34,23 @@ import (
 // The one thing that *is* configurable is the expiry, because only the caller knows how
 // slow its boot path is; see MaxKeyTTL for the ceiling that keeps "short-lived" true.
 
+// MaxDescription is the API's ceiling for a key's description, in bytes.
+//
+// It is a hard cap, not a preference: a description longer than this is a 400, and a 400
+// here means no key and a machine that can never boot. Firefly's own names can reach 63
+// characters, so a prefix plus a name can exceed it — see describedName.
+const MaxDescription = 50
+
+// MinKeyTTL is the shortest key this package will mint.
+//
+// The API takes a whole number of seconds, and **zero means no expiry at all** — not
+// "expires immediately". A sub-second TTL would therefore truncate to a permanent key,
+// which inverts the one guarantee this file exists to make, so it is refused rather than
+// rounded: a caller asking for half a second has asked for something that cannot be
+// honoured, and rounding it up would hand back a key that dies before a machine can boot
+// while looking like success.
+const MinKeyTTL = time.Second
+
 // MaxKeyTTL bounds how long an enrolment key may live.
 //
 // A key is valid from mint to join, and the window between them is one `Create` plus one
@@ -65,6 +82,23 @@ type Key struct {
 	Description string
 }
 
+// describedName builds the description an operator sees in the admin console next to the
+// device a key created, within the API's byte limit.
+//
+// The *tail* of the name is what survives truncation, because that is the part that tells
+// two machines of one deployment apart: names are minted as "<label>-<counter>", so a long
+// label truncated from the front keeps the counter and a long label truncated from the end
+// would not.
+func describedName(name string) string {
+	const prefix = "verge "
+	budget := MaxDescription - len(prefix)
+	if len(name) > budget {
+		// "…" is three bytes, so it has to come out of the budget.
+		name = "…" + name[len(name)-(budget-3):]
+	}
+	return prefix + name
+}
+
 // MintKey requests a single-use ephemeral enrolment key for the named machine.
 //
 // The description is what an operator sees in the tailnet's admin console next to the
@@ -74,13 +108,16 @@ func (c *Client) MintKey(ctx context.Context, name string, ttl time.Duration) (K
 	switch {
 	case name == "":
 		return Key{}, fmt.Errorf("%w: no machine name", ErrKeyRequest)
-	case ttl <= 0:
-		return Key{}, fmt.Errorf("%w: ttl %s", ErrKeyRequest, ttl)
+	case ttl < MinKeyTTL:
+		// Not merely "too short": the wire value is whole seconds and zero means never
+		// expires, so this is the difference between a key that lapses in a minute and
+		// one that never does.
+		return Key{}, fmt.Errorf("%w: ttl %s is under %s, and a truncated expiry of zero means no expiry", ErrKeyRequest, ttl, MinKeyTTL)
 	case ttl > MaxKeyTTL:
 		return Key{}, fmt.Errorf("%w: ttl %s is longer than the %s ceiling", ErrKeyRequest, ttl, MaxKeyTTL)
 	}
 
-	description := "verge machine " + name
+	description := describedName(name)
 	body := map[string]any{
 		"description":   description,
 		"expirySeconds": int(ttl.Seconds()),

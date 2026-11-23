@@ -81,10 +81,12 @@ func WithHTTPClient(h *http.Client) Option { return func(c *Client) { c.http = h
 
 // New returns a client for token.
 //
-// The token is a control-plane credential: it can read the tailnet and delete
-// devices from it. Nothing in this package puts it anywhere near a machine, and the
-// thing a machine does get — an ephemeral enrolment key — grants membership and
-// nothing else. That distinction is the same one the whole design rests on.
+// The token is a control-plane credential: it reads the tailnet, deletes devices from it,
+// and mints enrolment keys. An OAuth client therefore needs the `devices:core` and
+// `auth_keys` scopes; an API key owned by a user with access to the tailnet carries them
+// already. Nothing in this package puts it anywhere near a machine, and the thing a
+// machine does get — an ephemeral enrolment key — grants membership and nothing else.
+// That distinction is the same one the whole design rests on.
 func New(token string, opts ...Option) *Client {
 	c := &Client{
 		token:   token,

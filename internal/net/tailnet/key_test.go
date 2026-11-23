@@ -156,6 +156,10 @@ func TestMintKey(t *testing.T) {
 		{"bad/zero_ttl", 0},
 		{"bad/negative_ttl", -time.Minute},
 		{"bad/a_key_that_would_outlive_its_purpose", MaxKeyTTL + time.Second},
+		// A sub-second TTL truncates to zero on the wire, and zero means *no expiry* —
+		// so this is the difference between a key that lapses and one that never does.
+		{"bad/a_sub_second_ttl_would_mint_a_permanent_key", 500 * time.Millisecond},
+		{"bad/just_under_a_second", MinKeyTTL - time.Nanosecond},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -165,6 +169,55 @@ func TestMintKey(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("happy/the_shortest_allowed_ttl_mints_a_whole_second", func(t *testing.T) {
+		c, req := newMinter(t, http.StatusOK, `{"key":"tskey-auth-k1-abc"}`)
+		if _, err := c.MintKey(ctx, "verge-machine-1", MinKeyTTL); err != nil {
+			t.Fatalf("MintKey at MinKeyTTL: %v", err)
+		}
+		if got := req.body["expirySeconds"]; got != float64(1) {
+			t.Fatalf("expirySeconds = %v, want 1", got)
+		}
+	})
+
+	// Firefly mints names up to 63 characters, and the API caps a description at 50 —
+	// so a long deployment label is a 400, i.e. no key and a machine that cannot boot.
+	t.Run("happy/a_long_name_still_fits_the_description_limit", func(t *testing.T) {
+		long := strings.Repeat("a", 42) + "-18446744073709551615"
+		if len(long) <= MaxDescription {
+			t.Fatalf("the fixture name is only %d bytes, so it does not test the limit", len(long))
+		}
+
+		c, req := newMinter(t, http.StatusOK, `{"key":"tskey-auth-k1-abc"}`)
+		if _, err := c.MintKey(ctx, long, time.Minute); err != nil {
+			t.Fatalf("MintKey: %v", err)
+		}
+
+		description, _ := req.body["description"].(string)
+		if len(description) > MaxDescription {
+			t.Fatalf("the description is %d bytes: %q", len(description), description)
+		}
+		// The counter at the end is what tells two machines of one deployment apart, so
+		// it is the part truncation must keep.
+		if !strings.HasSuffix(description, "18446744073709551615") {
+			t.Fatalf("the description lost the counter: %q", description)
+		}
+		if !strings.Contains(description, "…") {
+			t.Fatalf("the description was not truncated at all: %q", description)
+		}
+	})
+
+	t.Run("happy/two_long_names_stay_distinguishable", func(t *testing.T) {
+		prefix := strings.Repeat("b", 42)
+		first := describedName(prefix + "-1")
+		second := describedName(prefix + "-2")
+		if first == second {
+			t.Fatalf("two machines share one description: %q", first)
+		}
+		if len(first) > MaxDescription || len(second) > MaxDescription {
+			t.Fatalf("descriptions are %d and %d bytes", len(first), len(second))
+		}
+	})
 
 	t.Run("bad/an_empty_machine_name", func(t *testing.T) {
 		c, _ := newMinter(t, http.StatusOK, `{}`)
