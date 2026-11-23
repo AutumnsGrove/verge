@@ -707,8 +707,10 @@ rediscover:
   ever is not.
 - **A device registered but never authorized is indistinguishable from one that never registered.** The
   interface is three booleans and an error; there is no vocabulary for "registered and waiting for a
-  human". `BootDeadline` is what bounds the cost: the machine is destroyed and reprovisioned, which is
-  noisy and self-healing the moment someone approves the device.
+  human". It is the same never-joined case as the wrong hostname above, and it costs the same way:
+  `BootDeadline` bounds how long each attempt churns by moving the machine to `ERROR`, the retry returns
+  it to `PROVISIONING`, and the `MaxLifetime` cap is what destroys it. Noisy until someone approves the
+  device, self-healing the moment they do, and a capped loop rather than a quiet one until then.
 
 ### The dependency that was missing
 
