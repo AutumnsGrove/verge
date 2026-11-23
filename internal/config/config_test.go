@@ -214,6 +214,14 @@ func TestParseRejects(t *testing.T) {
 			want: "--key-ttl",
 		},
 		{
+			// Under the floor, not over the ceiling, and not shorter than the boot
+			// deadline: every other rule in validate passes, and the mint would fail.
+			name: "bad/a_key_ttl_under_what_the_minter_accepts",
+			env:  env(),
+			args: append(required, "--key-ttl", "500ms", "--boot-deadline", "100ms"),
+			want: "--key-ttl must be between",
+		},
+		{
 			name: "bad/a_key_ttl_past_what_the_minter_accepts",
 			env:  env(),
 			args: append(required, "--key-ttl", "2h", "--boot-deadline", "10m"),

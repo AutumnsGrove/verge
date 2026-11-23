@@ -273,12 +273,15 @@ func (c *Config) validate() error {
 	if c.SyncAttempts < 1 {
 		problems = append(problems, "--sync-attempts must be at least 1")
 	}
-	if c.KeyTTL > tailnet.MaxKeyTTL {
-		// The key minter refuses this, so without the check the operator would learn it
-		// on the first provision instead of at startup.
+	// Both ends of the range, from the package that enforces them: the minter refuses a
+	// TTL outside it, and a caller that learns that on its first provision instead of at
+	// startup has been told too late. One rule rather than two so that adding a third
+	// bound later cannot leave half the range unchecked — this ceiling was checked on its
+	// own for one review round while the floor was not.
+	if c.KeyTTL > 0 && (c.KeyTTL < tailnet.MinKeyTTL || c.KeyTTL > tailnet.MaxKeyTTL) {
 		problems = append(problems, fmt.Sprintf(
-			"--key-ttl (%s) is longer than the %s ceiling enforced when a key is minted",
-			c.KeyTTL, tailnet.MaxKeyTTL))
+			"--key-ttl must be between %s and %s, got %s; the minter rejects anything else",
+			tailnet.MinKeyTTL, tailnet.MaxKeyTTL, c.KeyTTL))
 	}
 	if c.KeyTTL > 0 && c.BootDeadline > 0 && c.KeyTTL < c.BootDeadline {
 		problems = append(problems, fmt.Sprintf(
