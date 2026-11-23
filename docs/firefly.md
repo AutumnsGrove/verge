@@ -692,8 +692,15 @@ configuration a human has to look at.
 **One assumption is load-bearing and belongs to a different package.** The client matches a device by
 its hostname, because that is the only name a tailnet knows. So a machine must join under the name
 firefly minted for it: the rendered cloud-init has to set the hostname to `Spec.Name`, and the
-enrolment key has to be `preauthorized` or the device waits for a human. `internal/cloudinit` now does
-the first of those; the key minter does not exist yet. The failure mode is quiet in the wrong way. A machine that joins under the image's default hostname is a machine nothing can find, so
+enrolment key has to be `preauthorized` or the device waits for a human. Both halves now exist —
+`internal/cloudinit` sets the name, and `tailnet.Client.MintKey` mints the key with three of its four
+capabilities fixed: **ephemeral**, because deletion depends on node records that clear themselves;
+**not reusable**, because a key that can enrol a second machine escapes the machine it was written for;
+and **preauthorized**, because a device waiting for a human approval is indistinguishable from a machine
+that never joined. The one configurable capability is the expiry, capped at an hour, since only the
+caller knows how slow its boot path is — and a caller-chosen value in prose is a wish without the cap.
+
+The failure mode is quiet in the wrong way. A machine that joins under the image's default hostname is a machine nothing can find, so
 `BootDeadline` moves it to `ERROR`, the retry puts it back in `PROVISIONING`, and only the `MaxLifetime`
 cap actually destroys it (through `Capped → Syncing → beginTeardown`, with a no-op save because it never
 reached `READY`). Getting this wrong therefore costs a machine booting on a loop until its cap, and then
