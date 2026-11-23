@@ -43,11 +43,14 @@ func parse(t *testing.T, out []byte) parsed {
 		WriteFiles       []writeFile `yaml:"write_files"`
 		RunCmd           []string    `yaml:"runcmd"`
 	}
+	// cloud-init returns early from cc_set_hostname and cc_update_hostname when this
+	// flag is true, so a document that sets it does not name the machine — the field is
+	// decoded here only so the assertion can see it.
+	if doc.PreserveHostname {
+		t.Fatal("preserve_hostname is set, which makes cloud-init skip the hostname: key entirely")
+	}
 	if err := yaml.Unmarshal([]byte(strings.TrimPrefix(text, Header)), &doc); err != nil {
 		t.Fatalf("the rendering is not valid YAML: %v\n%s", err, text)
-	}
-	if !doc.PreserveHostname {
-		t.Error("preserve_hostname is not set, so DHCP may rename the machine after it joins")
 	}
 	if len(doc.WriteFiles) != 1 {
 		t.Fatalf("%d write_files entries, want 1", len(doc.WriteFiles))
@@ -109,7 +112,7 @@ func TestRender(t *testing.T) {
 		if err := yaml.Unmarshal([]byte(strings.TrimPrefix(string(out), Header)), &keys); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		want := map[string]bool{"hostname": true, "preserve_hostname": true, "write_files": true, "runcmd": true}
+		want := map[string]bool{"hostname": true, "write_files": true, "runcmd": true}
 		for k := range keys {
 			if !want[k] {
 				t.Errorf("the boot script carries an unreviewed key %q", k)

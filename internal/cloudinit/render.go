@@ -118,14 +118,24 @@ type writeFile struct {
 
 // config is the cloud-config document. The field tags are the cloud-init keys; the
 // set is deliberately tiny.
+//
+// There is no `preserve_hostname` here, and its absence is load-bearing rather than an
+// oversight. cloud-init's `cc_set_hostname` and `cc_update_hostname` both return early
+// when that flag is true — before they look at the `hostname` key or the datasource
+// metadata — so setting it does not preserve the hostname, it stops the document
+// naming the machine at all. On a provider whose server name reaches the guest as
+// datasource metadata, the flag would leave the machine answering to the image's
+// default name, which is the one thing this package exists to prevent. A test asserts
+// the key never appears.
+//
+// If a distribution's DHCP client later rewrites the hostname, that is a networking
+// setting for the image (netplan's `dhcp4-overrides`), not a cloud-init hostname flag:
+// cloud-init only acts at boot, so this key could never have protected the window after
+// the node joins anyway.
 type config struct {
-	// Hostname is set explicitly, and preserve_hostname keeps the distribution from
-	// overwriting it from DHCP: a machine whose hostname feeds a tailnet record must
-	// not have it change after the node joins.
-	Hostname         quoted      `yaml:"hostname"`
-	PreserveHostname bool        `yaml:"preserve_hostname"`
-	WriteFiles       []writeFile `yaml:"write_files"`
-	RunCmd           []quoted    `yaml:"runcmd"`
+	Hostname   quoted      `yaml:"hostname"`
+	WriteFiles []writeFile `yaml:"write_files"`
+	RunCmd     []quoted    `yaml:"runcmd"`
 }
 
 // Header is the first line cloud-init requires. It is separate from the document
@@ -163,8 +173,7 @@ func Render(s Spec) ([]byte, error) {
 	}
 
 	doc, err := yaml.Marshal(config{
-		Hostname:         quoted(s.Hostname),
-		PreserveHostname: true,
+		Hostname: quoted(s.Hostname),
 		WriteFiles: []writeFile{{
 			Path:        quoted(Path),
 			Owner:       quoted("root:root"),

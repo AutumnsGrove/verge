@@ -201,10 +201,20 @@ which is cheaper to read than to rediscover:
 - **The renderer is not a hostname validator.** It guarantees escaping, and the provider guarantees
   validity by refusing the create. Two validators would be two things to keep in step, and a name that
   is refused here has no create to be refused by.
+- **There is no `preserve_hostname` key**, and the first version of this package had one. cloud-init
+  returns early from `cc_set_hostname` and `cc_update_hostname` when that flag is true — before it reads
+  the `hostname` key or the datasource metadata — so setting it does not preserve the name, it stops the
+  document naming the machine at all. The machine keeps the image's default hostname, joins the tailnet
+  under it, and the network is never asked about a name that exists: the exact failure this package
+  exists to prevent, caused by a key that looked like hardening. The flag is gone from the struct so it
+  cannot come back, and `TestRender` asserts the key set exactly — a document that grows a key without a
+  review is a document a machine executes. A distribution that later renames itself over DHCP is an image
+  problem (netplan's `dhcp4-overrides`), because cloud-init only acts at boot.
 
 `FuzzCloudInit` asserts the strong property: every accepted input parses back byte for byte, the document
 contains exactly one `write_files` entry and one `runcmd`, and no input can become structure. Seeds on
-every PR, and the two minimised inputs the fuzzer found are committed under `testdata/fuzz/`.
+every PR, and both minimised inputs the fuzzer found — a newline-only hostname and an invalid-UTF-8 one —
+are committed under `testdata/fuzz/FuzzCloudInit/`.
 
 ### The R2 store
 
