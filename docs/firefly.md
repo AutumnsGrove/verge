@@ -748,8 +748,8 @@ Named so that review can point at them and say "not here":
 Not decided here, recorded so the next document does not invent an answer by accident:
 
 1. **Lease durability granularity.** Decided for now: **one document for all machines**, and the
-   document is validated on both read and write — by firefly, in `save` and `load`, so the refusal is
-   the same whichever store is behind it, rather than by each store in its own way. A shard per machine
+   document is validated on read by `load`, and on write twice: by `save`, and again by the store,
+   because the store is the thing that can lose the last good copy. A shard per machine
    would survive a partial write
    better, but a partial write needs a crash at a specific instant while the orphan sweep runs every
    tick, and the sweep is materially harder against shards. Revisit when there is a two-machine

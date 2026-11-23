@@ -99,8 +99,9 @@ var _ firefly.Store = (*Store)(nil)
 // read is not an empty store, and treating it as one would let a restart adopt nothing
 // and delete everything.
 //
-// The document is returned as stored. Validating it is firefly's job, on both paths,
-// so that the refusal is the same whichever store is behind it.
+// The document is returned as stored, without being validated: `firefly.load` checks
+// it before acting on it, so an unreadable document is refused in one place rather than
+// in each store's own way. Save is the opposite, and for a reason — see there.
 func (s *Store) Load(ctx context.Context) (firefly.Document, error) {
 	out, err := s.api.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
@@ -137,6 +138,16 @@ func (s *Store) Load(ctx context.Context) (firefly.Document, error) {
 // open question 5 in docs/firefly.md (adoption after a split brain), and it is not a
 // question this package should answer by silently losing writes.
 func (s *Store) Save(ctx context.Context, doc firefly.Document) error {
+	// The Store contract asks implementations to refuse a document that fails
+	// Validate, and this is the implementation where it matters most: an invalid
+	// document written over a valid one has destroyed the only copy of what firefly
+	// knew. Firefly validates before it calls here, so this is a second gate rather
+	// than the first — kept because the exported type can be called by anything, and
+	// because the two stores must not differ in what they promise.
+	if err := doc.Validate(); err != nil {
+		return fmt.Errorf("r2: refusing to save an invalid document: %w", err)
+	}
+
 	raw, err := json.Marshal(doc)
 	if err != nil {
 		return fmt.Errorf("r2: encoding the document: %w", err)

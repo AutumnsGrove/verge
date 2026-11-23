@@ -371,3 +371,43 @@ func (nopNetwork) Forget(context.Context, string) error             { return nil
 type nopSyncer struct{}
 
 func (nopSyncer) Sync(context.Context, firefly.MachineID) error { return nil }
+
+// TestSaveRefusesAnInvalidDocument.
+//
+// The Store contract asks implementations to reject one, and MemStore does. This store
+// is where the requirement bites hardest: an invalid document PUT over a valid one has
+// destroyed the only copy of what firefly knew, and firefly's own check protects the
+// firefly path rather than the exported type.
+func TestSaveRefusesAnInvalidDocument(t *testing.T) {
+	var puts int
+	s, _ := newStore(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			puts++
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	cases := []struct {
+		name string
+		doc  firefly.Document
+	}{
+		{"bad/a_document_from_a_future_build", firefly.Document{Version: firefly.DocumentVersion + 1}},
+		{"bad/a_machine_with_no_name", firefly.Document{
+			Version: firefly.DocumentVersion,
+			Machines: []firefly.Machine{{
+				ID: firefly.MachineID("hetzner:42"), State: firefly.Ready, CreatedAt: base,
+				Deadline: base.Add(time.Hour), Since: base,
+			}},
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := s.Save(context.Background(), tc.doc); err == nil {
+				t.Fatal("Save accepted a document that does not validate")
+			}
+		})
+	}
+	if puts != 0 {
+		t.Fatalf("%d writes reached the bucket for documents that were refused", puts)
+	}
+}
