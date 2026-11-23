@@ -21,8 +21,8 @@ loop, `Provision`, machine naming, and all three boundary interfaces — provide
 and state sync — each with a fake. The Hetzner client is written but has never been pointed at the
 real API: the unit tier runs it against `httptest`, and the contract tier that would use a real token
 does not exist yet. The tailnet client and the R2 state store exist and are tested against `httptest`,
-and neither has been pointed at real infrastructure. Nothing yet reconciles on a timer: there is no
-`main`.
+and neither has been pointed at real infrastructure. The cloud-init renderer exists and is fuzzed, but
+nothing mints the enrolment key it expects. Nothing yet reconciles on a timer: there is no `main`.
 `docs/testing.md` names the files the rest will become, and `docs/firefly.md` is the design they
 implement.
 

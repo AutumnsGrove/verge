@@ -11,7 +11,9 @@ The transition table, the lease arithmetic, the durable document with its in-mem
 registry, both boundary interfaces including the syncer, the reconcile loop (`Tick`), and
 `Provision` are implemented in `internal/firefly`, with a fake for each outside world. All three real
 boundaries exist and are tested against `httptest`, and none has run against its API: Hetzner
-(`internal/cloud/hetzner`), the tailnet (`internal/net/tailnet`), and R2 (`internal/store/r2`).
+(`internal/cloud/hetzner`), the tailnet (`internal/net/tailnet`), and R2 (`internal/store/r2`). The
+boot script is rendered too (`internal/cloudinit`), so a machine can now be told what it needs to know;
+nothing yet calls any of it on a timer, because there is no `main`.
 
 `Network` is keyed on the machine's name, `Machine` records that name, and `Provision` mints it; see
 "What a node is called" for the decision and `internal/firefly/name.go` for the shape. `docs/testing.md`
@@ -622,7 +624,9 @@ anything, so keying on the name needs no boot-time cooperation at all — and
 survives the bootstrap that failed, which is exactly the machine most likely to
 need forgetting.
 
-**Built.** `internal/firefly/network.go` takes a name, `Machine.Name` records it,
+**Built.** `internal/cloudinit` renders the name into the boot script, which is what makes the
+hostname the network is asked about the hostname the machine actually has. `internal/firefly/network.go`
+takes a name, `Machine.Name` records it,
 `Provision` mints one when the caller does not supply it, and adoption takes it from the
 provider's listing rather than inventing one — the node a machine actually has is keyed on
 the name it was created with, so a name invented at adoption would be a machine nothing
@@ -683,12 +687,13 @@ node belonging to a machine firefly did not create. It is the symptom of two dep
 same name into one tailnet — exactly what the label-derived name prefix exists to prevent — and it is a
 configuration a human has to look at.
 
-**One assumption is load-bearing and belongs to a different PR.** The client matches a device by its
-hostname, because that is the only name a tailnet knows. So a machine must join under the name firefly
-minted for it: the rendered cloud-init has to set the hostname to `Spec.Name`, and the enrolment key has
-to be `preauthorized` or the device waits for a human. Neither the cloud-init renderer nor the key
-minter exists yet, so nothing in the tree enforces either — and the failure mode is quiet in the wrong
-way. A machine that joins under the image's default hostname is a machine nothing can find, so
+### The renderer's half
+
+**One assumption is load-bearing and belongs to a different package.** The client matches a device by
+its hostname, because that is the only name a tailnet knows. So a machine must join under the name
+firefly minted for it: the rendered cloud-init has to set the hostname to `Spec.Name`, and the
+enrolment key has to be `preauthorized` or the device waits for a human. `internal/cloudinit` now does
+the first of those; the key minter does not exist yet. The failure mode is quiet in the wrong way. A machine that joins under the image's default hostname is a machine nothing can find, so
 `BootDeadline` moves it to `ERROR`, the retry puts it back in `PROVISIONING`, and only the `MaxLifetime`
 cap actually destroys it (through `Capped → Syncing → beginTeardown`, with a no-op save because it never
 reached `READY`). Getting this wrong therefore costs a machine booting on a loop until its cap, and then
