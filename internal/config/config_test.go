@@ -1,9 +1,12 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -211,6 +214,12 @@ func TestParseRejects(t *testing.T) {
 			want: "--key-ttl",
 		},
 		{
+			name: "bad/a_key_ttl_past_what_the_minter_accepts",
+			env:  env(),
+			args: append(required, "--key-ttl", "2h", "--boot-deadline", "10m"),
+			want: "--key-ttl",
+		},
+		{
 			name: "bad/an_empty_machine_field",
 			env:  env(),
 			args: append(required, "--image", ""),
@@ -259,20 +268,50 @@ func TestMissingEverything(t *testing.T) {
 
 // TestFlagsAreNotSecrets: the same credentials passed as flags must not be accepted,
 // because that is the one place they would be visible to every user on the box.
+//
+// The cases are derived from the environment constants rather than written out, so a
+// fifth secret added later cannot be tested in three places out of four.
 func TestFlagsAreNotSecrets(t *testing.T) {
-	for _, args := range [][]string{
-		append(required, "--hetzner-token", "leaked"),
-		append(required, "--tailnet-token", "leaked"),
-		append(required, "--s3-secret-key", "leaked"),
-	} {
-		t.Run(args[len(args)-2], func(t *testing.T) {
-			_, err := Parse(args, env())
-			if err == nil {
-				t.Fatalf("Parse accepted %s as a flag", args[len(args)-2])
-			}
-			// flag's own error is the right one: the flag does not exist.
-			if !strings.Contains(err.Error(), "flag provided but not defined") {
+	secrets := map[string]string{
+		EnvHetznerToken: "leaked",
+		EnvTailnetToken: "leaked",
+		EnvS3AccessKey:  "leaked",
+		EnvS3SecretKey:  "leaked",
+	}
+	// Counted from the type rather than written out, so adding a fifth Secret field to
+	// Config fails here until the case above is added too — the "tested in three places
+	// out of four" bug this finding was.
+	secretFields := 0
+	typ := reflect.TypeOf(Config{})
+	for i := 0; i < typ.NumField(); i++ {
+		if typ.Field(i).Type == reflect.TypeOf(Secret("")) {
+			secretFields++
+		}
+	}
+	if len(secrets) != secretFields {
+		t.Fatalf("Config has %d Secret fields and this test covers %d: update both", secretFields, len(secrets))
+	}
+
+	for name := range secrets {
+		t.Run(name, func(t *testing.T) {
+			// VERGE_S3_ACCESS_KEY has one obvious flag spelling, and that is the one a
+			// caller would reach for.
+			flagName := "-" + strings.ToLower(strings.ReplaceAll(strings.TrimPrefix(name, "VERGE_"), "_", "-"))
+
+			if _, err := Parse(append(required, flagName, "leaked"), env()); err == nil {
+				t.Fatalf("Parse accepted %s as a flag", flagName)
+			} else if !strings.Contains(err.Error(), "flag provided but not defined") {
 				t.Fatalf("Parse = %v, want an undefined-flag error", err)
+			}
+
+			// And it is not in the usage text either, which is how an operator would
+			// discover a flag that exists.
+			var out strings.Builder
+			if _, err := Parse([]string{"-h"}, env(), WithUsage(&out)); !errors.Is(err, flag.ErrHelp) {
+				t.Fatalf("Parse(-h) = %v", err)
+			}
+			if strings.Contains(out.String(), flagName) {
+				t.Fatalf("the usage text offers %s", flagName)
 			}
 		})
 	}
@@ -303,6 +342,28 @@ func TestSecretsDoNotPrint(t *testing.T) {
 		"secret alone": render("%v %+v %s %d", cfg.HetznerToken, cfg.HetznerToken,
 			cfg.HetznerToken, len(cfg.HetznerToken)),
 	}
+
+	// A structured logger is how a service actually logs its configuration, and fmt is
+	// not the only way a value reaches it.
+	if raw, err := json.Marshal(cfg); err == nil {
+		renderings["json.Marshal(config)"] = string(raw)
+	} else {
+		t.Fatalf("json.Marshal(config): %v", err)
+	}
+	if raw, err := json.Marshal(map[string]any{"cfg": *cfg}); err == nil {
+		renderings["json.Marshal(map)"] = string(raw)
+	} else {
+		t.Fatalf("json.Marshal(map): %v", err)
+	}
+	if text, err := cfg.HetznerToken.MarshalText(); err == nil {
+		renderings["MarshalText"] = string(text)
+	} else {
+		t.Fatalf("MarshalText: %v", err)
+	}
+
+	var logged strings.Builder
+	slog.New(slog.NewJSONHandler(&logged, nil)).Info("verge", "cfg", *cfg)
+	renderings["slog JSON handler"] = logged.String()
 
 	for name, out := range renderings {
 		for _, secret := range secrets {

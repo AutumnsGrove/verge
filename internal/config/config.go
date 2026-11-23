@@ -20,12 +20,15 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"strings"
 	"time"
+
+	"github.com/AutumnsGrove/verge/internal/net/tailnet"
 )
 
 // Environment variable names for the three secrets.
@@ -101,9 +104,19 @@ type Config struct {
 
 // Secret is a string that does not print itself.
 //
-// `fmt`'s `%v` and `%s` print the redaction, and the value needs `.Reveal()` to be seen
-// at all — which is the point: the one place a credential is meant to be read is the
-// line that builds a client, and a test asserts nothing else prints it.
+// It implements every way a value escapes into a log line, which is more than `fmt`:
+//
+//   - String and GoString cover `%v`, `%s`, `%+v` and `%#v` — the last being the verb a
+//     debugging session reaches for, and the one a naive wrapper forgets.
+//   - MarshalJSON covers a `slog` JSON handler, an HTTP debug endpoint, and anything else
+//     that encodes a struct field by field. Without it, `json.Marshal(cfg)` and
+//     `slog.NewJSONHandler(os.Stdout, nil).Info("cfg", "cfg", cfg)` both print all four
+//     credentials — which is how a service actually logs its configuration.
+//   - MarshalText covers the encoders that ask for text rather than JSON.
+//
+// The value needs `.Reveal()` to be read at all, which is the point: the one place a
+// credential is meant to be read is the line that builds a client, and a test asserts
+// nothing else prints it.
 type Secret string
 
 // Redacted is what a Secret prints as, and how long it was is not part of it.
@@ -119,6 +132,13 @@ func (s Secret) String() string { return Redacted }
 // GoString implements fmt.GoStringer, so `%#v` is redacted too — that is the verb a
 // debugging session reaches for and the one a naive Secret type forgets.
 func (s Secret) GoString() string { return Redacted }
+
+// MarshalJSON implements json.Marshaler, so a structured logger or an encoder cannot
+// serialize the value it is protecting.
+func (s Secret) MarshalJSON() ([]byte, error) { return json.Marshal(Redacted) }
+
+// MarshalText implements encoding.TextMarshaler, for the encoders that ask for text.
+func (s Secret) MarshalText() ([]byte, error) { return []byte(Redacted), nil }
 
 // ErrConfig means the arguments and environment cannot describe a working process.
 var ErrConfig = errors.New("config: invalid configuration")
@@ -252,6 +272,13 @@ func (c *Config) validate() error {
 	}
 	if c.SyncAttempts < 1 {
 		problems = append(problems, "--sync-attempts must be at least 1")
+	}
+	if c.KeyTTL > tailnet.MaxKeyTTL {
+		// The key minter refuses this, so without the check the operator would learn it
+		// on the first provision instead of at startup.
+		problems = append(problems, fmt.Sprintf(
+			"--key-ttl (%s) is longer than the %s ceiling enforced when a key is minted",
+			c.KeyTTL, tailnet.MaxKeyTTL))
 	}
 	if c.KeyTTL > 0 && c.BootDeadline > 0 && c.KeyTTL < c.BootDeadline {
 		problems = append(problems, fmt.Sprintf(
