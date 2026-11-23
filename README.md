@@ -20,7 +20,8 @@ arithmetic, the durable state document with an in-memory store, the lease regist
 loop, `Provision`, machine naming, and all three boundary interfaces — provider, private network,
 and state sync — each with a fake. The Hetzner client is written but has never been pointed at the
 real API: the unit tier runs it against `httptest`, and the contract tier that would use a real token
-does not exist yet. There is no tailnet client and no object storage.
+does not exist yet. The tailnet client exists and is tested against `httptest`, and has never been
+pointed at a real tailnet. There is no object storage.
 `docs/testing.md` names the files the rest will become, and `docs/firefly.md` is the design they
 implement.
 

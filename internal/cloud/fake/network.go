@@ -95,6 +95,13 @@ func (n *Network) ForgetRefuses(n2 int) *Network {
 // --- provider ------------------------------------------------------------
 
 // Joined reports a node that exists *and* whose machine is usable right now.
+//
+// "Usable" is derived from the machine record because a fake has no mesh agent to
+// observe: the real tailnet client answers it from the device's authorization and its
+// control-plane connection. The fake's version is therefore a model of the same fact
+// reached from the only evidence a fake has, and it stays a hair stricter than the
+// real thing — which is the safe direction for a fake, because it fails loudly here
+// rather than silently in production.
 func (n *Network) Joined(ctx context.Context, name string) (bool, error) {
 	n.cloud.mu.Lock()
 	defer n.cloud.mu.Unlock()

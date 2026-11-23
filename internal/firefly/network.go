@@ -20,12 +20,17 @@ import "context"
 // cooperation from the machine to be matchable. See docs/firefly.md, "What a
 // node is called".
 type Network interface {
-	// Joined reports whether a node exists for the named machine *and* the
-	// machine is usable right now: present, and running.
+	// Joined reports whether a node exists for the named machine *and* that node is
+	// usable right now.
 	//
 	// It is the second half of READY. A machine that answers its metadata service
 	// and never joins is not ready, and a node that lingers after its machine is
 	// gone is not joined, however present the record is.
+	//
+	// What "usable" means is the network's own vocabulary, and it is not the
+	// provider's: a tailnet device is usable when it is registered, authorized, and
+	// talking to the control plane. A network cannot see whether a server is
+	// running, which is why Tick asks both interfaces and trusts neither alone.
 	Joined(ctx context.Context, name string) (bool, error)
 
 	// NodeExists reports whether a node record exists for the named machine,

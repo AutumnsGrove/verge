@@ -9,9 +9,9 @@ it through three narrow interfaces, and it is handed the current time rather tha
 
 The transition table, the lease arithmetic, the durable document with its in-memory store, the lease
 registry, both boundary interfaces including the syncer, the reconcile loop (`Tick`), and
-`Provision` are implemented in `internal/firefly`, with a fake for each outside world. A real Hetzner
-client exists and is tested against `httptest`, but has never run against the API. The tailnet client
-and the R2 store are not written.
+`Provision` are implemented in `internal/firefly`, with a fake for each outside world. Two real
+clients exist and are tested against `httptest`, but have never run against their APIs: Hetzner
+(`internal/cloud/hetzner`) and the tailnet (`internal/net/tailnet`). The R2 store is not written.
 
 `Network` is keyed on the machine's name, `Machine` records that name, and `Provision` mints it; see
 "What a node is called" for the decision and `internal/firefly/name.go` for the shape. `docs/testing.md`
@@ -346,6 +346,13 @@ conjunctive, and each half has its own way of lying:
 | never leaves `starting` | cloud-init never finished | `Cloud.Describe` | `StallBoot` |
 | running but never joins | the metadata service never came up, so the mesh agent never started | `Network.Joined` | `MetadataMissing` |
 
+`Network.Joined` is the tailnet's own answer, and writing the real client is what pinned it down: the
+device is registered, **authorized**, and **connected to the control plane**. It is deliberately not a
+question about the provider — a network cannot see whether a server is running, and the caller already
+asks that separately. The fake derives its version from the machine record because a fake has no agent
+to observe, which is why the fake's `Joined` is a hair stricter than the real one and why both halves
+are asserted in `Tick` rather than trusted from one interface.
+
 Both columns matter. A guarantee that names a fact no interface can read is not a guarantee, it is
 a wish — which is why the `Network` interface in "What firefly depends on" exists at all.
 
@@ -650,6 +657,45 @@ name the network is asked about afterwards. That test exists because the fake ca
 it — the fake resolves a node by looking its own records up by name, so it answers happily
 for any name it happens to agree with, which is exactly how mapping gaps of this shape
 stayed invisible before (`Lease.Machine`, `Acquire`'s machine, `Syncer`).
+
+### What the real tailnet client decides
+
+`internal/net/tailnet` is the other half of what `Network` promised, and writing it turned three
+sentences into decisions.
+
+**There is no join method, and that is the design.** A machine joins by running a mesh agent with a
+single-use, short-lived **ephemeral** enrolment key, and the key travels inside the rendered cloud-init
+rather than in a field of its own — a second copy of a secret is a second source of truth for it. So the
+client only ever asks and repairs: is the node there, is it usable, make it go away. The thing that
+mints a key belongs with the renderer, not with the observations.
+
+**"Usable" is the tailnet's fact, not the provider's.** The device is registered, **authorized**, and
+**connected to the control plane**; those three are what `Joined` answers, and the second two are the
+tailnet's own halves of readiness. An earlier sentence here said `Joined` reports "present, and
+running", which describes a fact no network can observe — the provider knows whether a server is
+running and says so in its own vocabulary, and `Tick` already asks it there. Reading the two answers
+together is what readiness is; expecting either interface to cover both is how a machine that never
+joined gets marked ready.
+
+**Two devices with one hostname is an error, not a guess.** Every guess is wrong in a way that costs:
+choosing one for `Joined` marks a machine ready that is not, and choosing one for `Forget` deletes a
+node belonging to a machine firefly did not create. It is the symptom of two deployments minting the
+same name into one tailnet — exactly what the label-derived name prefix exists to prevent — and it is a
+configuration a human has to look at.
+
+Two smaller consequences worth naming because they are the sort of thing a reviewer should not have to
+rediscover:
+
+- **Every question lists the devices.** The API has no lookup by name and no pagination, so one listing
+  per question is the honest shape. A cache would make the answer depend on whether something happened
+  to ask earlier — the exact bug the fake's node derivation was rewritten to remove — and it would have
+  to decide how long a fact about a machine that may have just joined is still true. The cost is one
+  listing per machine per tick, which is nothing at this size and is the first thing to revisit if it
+  ever is not.
+- **A device registered but never authorized is indistinguishable from one that never registered.** The
+  interface is three booleans and an error; there is no vocabulary for "registered and waiting for a
+  human". `BootDeadline` is what bounds the cost: the machine is destroyed and reprovisioned, which is
+  noisy and self-healing the moment someone approves the device.
 
 ### The dependency that was missing
 
