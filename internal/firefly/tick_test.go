@@ -89,6 +89,7 @@ func (h *harness) provision(state firefly.State) firefly.MachineID {
 	}
 	doc.Machines = append(doc.Machines, firefly.Machine{
 		ID:           id,
+		Name:         cm.Name,
 		State:        state,
 		CreatedAt:    cm.CreatedAt,
 		Deadline:     cm.CreatedAt.Add(4 * time.Hour),
@@ -944,4 +945,246 @@ func (s *toggleStore) Save(ctx context.Context, doc firefly.Document) error {
 		return errors.New("store: write rejected")
 	}
 	return s.inner.Save(ctx, doc)
+}
+
+// TestNamesJoinTheProviderAndTheNetwork is the mapping test docs/firefly.md asks
+// for, and it is the one the fake cannot pass by accident.
+//
+// The fake resolves a node by looking its own machine records up by name, so it
+// answers happily for any name it agrees with -- including an id, which is exactly
+// the question that was unanswerable before the rekey. The only place the two
+// vocabularies are actually joined is Provision: the name it sends to Create has to
+// be the name it later asks the network about, and nothing in the fake checks that.
+// This test does, by comparing what the provider was told with what the network was
+// asked, and by driving all three network calls so none of them can go unchecked.
+func TestNamesJoinTheProviderAndTheNetwork(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+
+	id, err := h.f.Provision(ctx, firefly.Spec{Image: "ubuntu-24.04"}, at(0))
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+
+	specs := h.cloud.Specs()
+	if len(specs) != 1 {
+		t.Fatalf("the provider was told about %d creates, want 1", len(specs))
+	}
+	name := specs[0].Name
+	if name == "" {
+		t.Fatal("Provision created a machine without a name")
+	}
+
+	doc, err := h.store.Load(ctx)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	m, ok := doc.Machine(id)
+	if !ok {
+		t.Fatal("the machine is not in the document")
+	}
+	if m.Name != name {
+		t.Fatalf("the document records %q, the provider was told %q", m.Name, name)
+	}
+
+	// Walk the whole lifecycle, so Joined, NodeExists and Forget are all asked.
+	h.tick(at(30 * time.Second))          // ready: Joined
+	h.tick(at(2 * time.Hour))             // no leases: draining
+	h.tick(at(3 * time.Hour))             // drained: syncing
+	h.tick(at(3 * time.Hour))             // synced: terminating, delete issued
+	h.tick(at(3*time.Hour + time.Minute)) // machine gone, node lingering: Forget
+	res := h.tick(at(3*time.Hour + 2*time.Minute))
+	if len(res.Confirmed) != 1 || res.Confirmed[0] != id {
+		t.Fatalf("Confirmed = %v, want [%s]", res.Confirmed, id)
+	}
+
+	joined, exists, forgets := h.net.Calls()
+	if joined == 0 || exists == 0 || forgets == 0 {
+		t.Fatalf("network calls = joined %d, exists %d, forgets %d; want all three exercised",
+			joined, exists, forgets)
+	}
+
+	asked := h.net.Asked()
+	if len(asked) == 0 {
+		t.Fatal("the network was never asked anything")
+	}
+	for _, got := range asked {
+		if got != name {
+			t.Fatalf("the network was asked about %q, want %q (the name the provider was told)", got, name)
+		}
+	}
+}
+
+// TestProvisionMintsNames: the caller supplies no name, so firefly does, and two
+// machines must not share one.
+func TestProvisionMintsNames(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+
+	first, err := h.f.Provision(ctx, firefly.Spec{}, at(0))
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	second, err := h.f.Provision(ctx, firefly.Spec{}, at(0))
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+
+	doc, err := h.store.Load(ctx)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	a, _ := doc.Machine(first)
+	b, _ := doc.Machine(second)
+
+	// The prefix comes from the harness's label, verge=machine, so the name says
+	// which deployment minted it.
+	if a.Name != "verge-machine-1" {
+		t.Fatalf("first name = %q, want verge-machine-1", a.Name)
+	}
+	if b.Name != "verge-machine-2" {
+		t.Fatalf("second name = %q, want verge-machine-2", b.Name)
+	}
+	if a.Name == b.Name {
+		t.Fatal("two machines were given one name")
+	}
+}
+
+// TestProvisionUsesTheCallersName: policy may know something about the name that
+// firefly does not, and it is honoured as long as it is unique.
+func TestProvisionUsesTheCallersName(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+
+	id, err := h.f.Provision(ctx, firefly.Spec{Name: "runner-a"}, at(0))
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	if got := h.cloud.Specs()[0].Name; got != "runner-a" {
+		t.Fatalf("the provider was told %q, want runner-a", got)
+	}
+	doc, _ := h.store.Load(ctx)
+	if m, _ := doc.Machine(id); m.Name != "runner-a" {
+		t.Fatalf("the document records %q, want runner-a", m.Name)
+	}
+
+	// A caller-chosen name still advances the counter past collisions, so the next
+	// minted name cannot land on top of it.
+	t.Run("sad/a_taken_name_is_refused_before_the_create", func(t *testing.T) {
+		createsBefore, _, _, _ := h.cloud.Calls()
+		if _, err := h.f.Provision(ctx, firefly.Spec{Name: "runner-a"}, at(time.Second)); !errors.Is(err, firefly.ErrNameTaken) {
+			t.Fatalf("Provision with a taken name = %v, want ErrNameTaken", err)
+		}
+		if createsAfter, _, _, _ := h.cloud.Calls(); createsAfter != createsBefore {
+			t.Fatalf("the provider was asked to create a machine for a name we refused (%d -> %d)", createsBefore, createsAfter)
+		}
+	})
+}
+
+// TestAdoptionKeepsTheProvidersName: an adopted machine's node is keyed on the name
+// it was created with. A name invented here would be a machine firefly could never
+// ask the network about, and the whole point of adoption is to recover management of
+// a machine that is already running.
+func TestAdoptionKeepsTheProvidersName(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	h.cloud.Boot(0)
+
+	id, err := h.cloud.Create(ctx, firefly.Spec{Name: "orphan-1", Labels: map[string]string{"verge": "machine"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	h.cloud.Advance(time.Minute)
+	res := h.tick(at(time.Minute))
+	if len(res.Adopted) != 1 || res.Adopted[0] != id {
+		t.Fatalf("Adopted = %v, want [%s]", res.Adopted, id)
+	}
+
+	doc, _ := h.store.Load(ctx)
+	m, _ := doc.Machine(id)
+	if m.Name != "orphan-1" {
+		t.Fatalf("the adopted machine is named %q, want orphan-1", m.Name)
+	}
+	if got := h.stateOf(id); got != firefly.Ready {
+		t.Fatalf("state = %s, want %s: the network answered for orphan-1", got, firefly.Ready)
+	}
+}
+
+// unnamedCloud is the shared fake with the one lie this suite needs and no other
+// test does: a provider that lists machines without names. Wrapping the fake rather
+// than writing a second cloud keeps one model of the provider, per docs/testing.md.
+type unnamedCloud struct{ *fake.Cloud }
+
+func (c unnamedCloud) List(ctx context.Context, label string) ([]firefly.CloudMachine, error) {
+	machines, err := c.Cloud.List(ctx, label)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]firefly.CloudMachine, len(machines))
+	for i, m := range machines {
+		m.Name = ""
+		out[i] = m
+	}
+	return out, nil
+}
+
+// TestUnnamedMachineCannotBeAdopted: adoption has no name to invent, because the
+// node the machine actually has is keyed on the name it was created with. Guessing
+// would produce a document Validate refuses, on every tick, forever.
+func TestUnnamedMachineCannotBeAdopted(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("sad/an_orphan_without_a_name_is_reported", func(t *testing.T) {
+		h := newHarness(t)
+		h.cloud.Boot(0)
+		f := unnamedFirefly(t, h)
+
+		if _, err := h.cloud.Create(ctx, firefly.Spec{Labels: map[string]string{"verge": "machine"}}); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+
+		h.cloud.Advance(time.Minute)
+		if _, err := f.Tick(ctx, at(time.Minute)); err == nil {
+			t.Fatal("Tick adopted a machine the provider reported without a name")
+		}
+	})
+
+	// The cap still has to work on a machine nothing can name: the sweep deletes by
+	// id and needs no node record, and a tick that refused to sweep would be exactly
+	// the unbounded bill the cap exists to prevent.
+	t.Run("sad/an_unnamed_orphan_past_the_cap_is_still_swept", func(t *testing.T) {
+		h := newHarness(t)
+		h.cloud.Boot(0)
+		f := unnamedFirefly(t, h)
+
+		id, err := h.cloud.Create(ctx, firefly.Spec{Labels: map[string]string{"verge": "machine"}})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+
+		h.cloud.Advance(5 * time.Hour)
+		res, err := f.Tick(ctx, at(5*time.Hour))
+		if err != nil {
+			t.Fatalf("Tick: %v", err)
+		}
+		if len(res.Swept) != 1 || res.Swept[0] != id {
+			t.Fatalf("Swept = %v, want [%s]", res.Swept, id)
+		}
+	})
+}
+
+// unnamedFirefly builds a firefly over the fake whose listing drops machine names.
+func unnamedFirefly(t *testing.T, h *harness) *firefly.Firefly {
+	t.Helper()
+	f, err := firefly.New(firefly.Config{
+		Store: h.store, Cloud: unnamedCloud{h.cloud}, Network: h.net, Syncer: h.sync,
+		Label: "verge=machine", MaxLifetime: 4 * time.Hour, DrainWindow: 15 * time.Minute,
+		BootDeadline: 10 * time.Minute, SyncAttempts: 3,
+		TerminateDeadline: 5 * time.Minute, RetryBase: 30 * time.Second, RetryMax: 5 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return f
 }

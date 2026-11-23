@@ -21,6 +21,17 @@ type MachineID string
 type Machine struct {
 	ID MachineID
 
+	// Name is the machine's name: the identifier the *network* knows it by, and
+	// the one the provider was told at creation. It is not derived from ID and
+	// not recoverable from the provider's id alone, which is why it is stored.
+	//
+	// Minted by Provision from a counter in the document, so it is unique, stable
+	// across restarts, and readable in a test without a random source. A name has
+	// to be unique per project anyway, the provider requires one, and it is the
+	// only identifier a tailnet can be asked about — see docs/firefly.md, "What a
+	// node is called".
+	Name string
+
 	// State is where the machine is. Origin is the state it was in before
 	// entering Error, and is empty otherwise; it is what chooses between the
 	// ERROR rows of the transition table.
@@ -74,13 +85,29 @@ type Document struct {
 	// stable enough to appear in a test without a random source.
 	NextLeaseNumber uint64
 
+	// NextMachineNumber is the same idea for machine names, which have to be
+	// unique per project and are the key the network is asked about. It shares the
+	// document's fate rather than the process's, so a restart continues the
+	// sequence instead of minting a name a live machine already has.
+	//
+	// A lost document restarts the sequence at zero, which is why Provision skips
+	// a name that is already in the document: after recovering by adoption, the
+	// next mint must not collide with a machine that is still running.
+	NextMachineNumber uint64
+
 	Machines []Machine
 	Leases   []Lease
 }
 
 // DocumentVersion is the schema version. It exists so that a document written
 // by a future binary is refused rather than half-understood.
-const DocumentVersion = 1
+//
+// Version 2 added Machine.Name and Document.NextMachineNumber. There is no
+// migration and no version 1 document in the world: the network was keyed on the
+// provider id when 1 was written, so a 1 is not a document this binary can act
+// on, and refusing it is more honest than adopting machines whose nodes nothing
+// can name.
+const DocumentVersion = 2
 
 // Lease errors that a document can be wrong about. They are distinct from the
 // lease arithmetic errors in lease.go: those are about a caller's request, these
@@ -109,6 +136,7 @@ func (d Document) Validate() error {
 	origins := errorOrigins()
 
 	byID := make(map[MachineID]struct{}, len(d.Machines))
+	byName := make(map[string]MachineID, len(d.Machines))
 	for _, m := range d.Machines {
 		if m.ID == "" {
 			return errors.New("firefly: machine with empty id")
@@ -117,6 +145,18 @@ func (d Document) Validate() error {
 			return fmt.Errorf("firefly: duplicate machine %q", m.ID)
 		}
 		byID[m.ID] = struct{}{}
+
+		// The name is what the network is asked about, so a machine without one
+		// could never become Ready and could never be confirmed gone. Two machines
+		// sharing one name is worse: they would share a node record, and deleting
+		// either would look like deleting both.
+		if m.Name == "" {
+			return fmt.Errorf("firefly: machine %q has no name", m.ID)
+		}
+		if other, dup := byName[m.Name]; dup {
+			return fmt.Errorf("firefly: machines %q and %q share the name %q", other, m.ID, m.Name)
+		}
+		byName[m.Name] = m.ID
 
 		// The state is persisted, so it is checked before it is trusted to select
 		// a branch below. Without this, an unknown state falls through to the
@@ -207,7 +247,7 @@ func (d Document) Validate() error {
 // of a tick. Without this, one goroutine's append is another's corrupt state,
 // and the race detector finds it only if a test happens to interleave.
 func (d Document) Clone() Document {
-	out := Document{Version: d.Version, NextLeaseNumber: d.NextLeaseNumber}
+	out := Document{Version: d.Version, NextLeaseNumber: d.NextLeaseNumber, NextMachineNumber: d.NextMachineNumber}
 	if d.Machines != nil {
 		out.Machines = make([]Machine, len(d.Machines))
 		copy(out.Machines, d.Machines)
@@ -227,6 +267,21 @@ func (d Document) Machine(id MachineID) (Machine, bool) {
 		}
 	}
 	return Machine{}, false
+}
+
+// nameTaken reports whether any machine in the document already has name.
+//
+// It is what keeps the minted sequence from colliding with a machine that
+// survived a lost document by being adopted: the counter restarts at zero, the
+// adopted machines keep the names they were created with, and the next mint has to
+// walk past them.
+func (d Document) nameTaken(name string) bool {
+	for _, m := range d.Machines {
+		if m.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // LeasesFor returns every lease held on a machine, live or lapsed.

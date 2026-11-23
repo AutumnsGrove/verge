@@ -13,10 +13,9 @@ registry, both boundary interfaces including the syncer, the reconcile loop (`Ti
 client exists and is tested against `httptest`, but has never run against the API. The tailnet client
 and the R2 store are not written.
 
-One decided change is not yet in the code: `Network` is specified above as keyed on the machine's
-name, while `internal/firefly/network.go` still takes a `MachineID`. See "What a node is called".
-`docs/testing.md` names the files the remainder will become, and every new behaviour still starts as
-a failing test.
+`Network` is keyed on the machine's name, `Machine` records that name, and `Provision` mints it; see
+"What a node is called" for the decision and `internal/firefly/name.go` for the shape. `docs/testing.md`
+names the files the remainder will become, and every new behaviour still starts as a failing test.
 
 One word on vocabulary: this document says **machine**, the product vocabulary of `README.md`.
 Where `docs/testing.md` says *instance* it means the same thing; the property names there are left
@@ -616,10 +615,32 @@ anything, so keying on the name needs no boot-time cooperation at all — and
 survives the bootstrap that failed, which is exactly the machine most likely to
 need forgetting.
 
-**Not built yet.** The interface above is the shape to implement; the code in
-`internal/firefly/network.go` still takes `MachineID`, and the tailnet client that
-would care does not exist. Recorded here so the change is a decision rather than a
-rediscovery.
+**Built.** `internal/firefly/network.go` takes a name, `Machine.Name` records it,
+`Provision` mints one when the caller does not supply it, and adoption takes it from the
+provider's listing rather than inventing one — the node a machine actually has is keyed on
+the name it was created with, so a name invented at adoption would be a machine nothing
+could ask about.
+
+Three rules fell out of writing it, and each is a test rather than a comment:
+
+- **The name is minted from a counter in the document** (`Document.NextMachineNumber`), not
+  from randomness, so it is unique, stable across a restart, and readable in a test. It is
+  prefixed from the deployment's `Label`, so two deployments sharing one tailnet do not mint
+  the same device name and a node called `verge-prod-12` says which deployment it belongs to.
+- **The counter skips a name the document already holds.** A lost document restarts the
+  sequence at zero while the machines it lost are being adopted, and the second mint must
+  walk past the first one rather than collide with it.
+- **A name is unique in the document and the document is validated on it.** Two machines
+  sharing a name share one node record: deleting either would look like deleting both. A
+  caller-supplied name that is already taken is refused *before* the create, since a create
+  that succeeded would have to be deleted again to stay consistent.
+
+The join this buys is one line in `Provision` and one test that asserts it
+(`TestNamesJoinTheProviderAndTheNetwork`): the name the provider is told at creation is the
+name the network is asked about afterwards. That test exists because the fake cannot catch
+it — the fake resolves a node by looking its own records up by name, so it answers happily
+for any name it happens to agree with, which is exactly how mapping gaps of this shape
+stayed invisible before (`Lease.Machine`, `Acquire`'s machine, `Syncer`).
 
 ### The dependency that was missing
 

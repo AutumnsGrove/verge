@@ -17,10 +17,10 @@ saves its state and disappears. You pay for the hours you used, not for the mont
 
 **Partly built, and only the offline parts.** `internal/firefly` has the transition table, the lease
 arithmetic, the durable state document with an in-memory store, the lease registry, the reconcile
-loop, `Provision`, and all three boundary interfaces — provider, private network, and state sync —
-each with a fake. The Hetzner client is written but has never been pointed at the real API: the unit
-tier runs it against `httptest`, and the contract tier that would use a real token does not exist
-yet. There is no tailnet client and no object storage.
+loop, `Provision`, machine naming, and all three boundary interfaces — provider, private network,
+and state sync — each with a fake. The Hetzner client is written but has never been pointed at the
+real API: the unit tier runs it against `httptest`, and the contract tier that would use a real token
+does not exist yet. There is no tailnet client and no object storage.
 `docs/testing.md` names the files the rest will become, and `docs/firefly.md` is the design they
 implement.
 

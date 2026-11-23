@@ -13,14 +13,24 @@ var docBase = time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
 func machineID(s string) MachineID { return MachineID(s) }
 
 // readyMachine is a valid, boring machine: created, capped, and sitting in Ready.
+//
+// The name is derived from the id so that two readyMachine calls produce two
+// valid machines, which is what the duplicate-name case is built from.
 func readyMachine(id MachineID) Machine {
 	return Machine{
 		ID:        id,
+		Name:      "name-" + string(id),
 		State:     Ready,
 		CreatedAt: docBase,
 		Deadline:  docBase.Add(4 * time.Hour),
 		Since:     docBase.Add(time.Minute),
 	}
+}
+
+// named returns m with a different name, for the cases that are about names.
+func named(m Machine, name string) Machine {
+	m.Name = name
+	return m
 }
 
 func leaseOn(id LeaseID, m MachineID, start time.Time, ttl time.Duration) Lease {
@@ -131,6 +141,34 @@ func TestDocumentValidate(t *testing.T) {
 			doc: Document{
 				Version:  DocumentVersion,
 				Machines: []Machine{readyMachine(machineID(""))},
+			},
+		},
+		{
+			// The name is what the network is asked about. A machine without one could
+			// never become Ready and could never be confirmed gone, so a document that
+			// carries one is not describing a world firefly could operate in.
+			name:  "bad/missing_machine_name",
+			isErr: true,
+			doc: Document{
+				Version: DocumentVersion,
+				Machines: []Machine{func() Machine {
+					m := readyMachine(machineID("m1"))
+					m.Name = ""
+					return m
+				}()},
+			},
+		},
+		{
+			// Two machines sharing one name share one node record: deleting either
+			// would look like deleting both, and deleting one would confirm the other.
+			name:  "bad/duplicate_machine_name",
+			isErr: true,
+			doc: Document{
+				Version: DocumentVersion,
+				Machines: []Machine{
+					readyMachine(machineID("m1")),
+					named(readyMachine(machineID("m2")), readyMachine(machineID("m1")).Name),
+				},
 			},
 		},
 		{
@@ -289,7 +327,7 @@ func TestOriginsAndRetriesAgree(t *testing.T) {
 		doc := Document{
 			Version: DocumentVersion,
 			Machines: []Machine{{
-				ID: machineID("m1"), State: Error, Origin: origin,
+				ID: machineID("m1"), Name: "name-m1", State: Error, Origin: origin,
 				Attempt: 1, LastErr: "boom", CreatedAt: docBase,
 				Deadline: docBase.Add(time.Hour), Since: docBase,
 			}},

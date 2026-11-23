@@ -45,6 +45,7 @@ func seedMachine(t *testing.T, f *Firefly) MachineID {
 	id := machineID("m1")
 	doc.Machines = append(doc.Machines, Machine{
 		ID:        id,
+		Name:      "name-" + string(id),
 		State:     Ready,
 		CreatedAt: regBase,
 		Deadline:  regBase.Add(f.cfg.MaxLifetime),
@@ -355,7 +356,7 @@ func TestFailedSaveLeavesMemoryBehind(t *testing.T) {
 	doc := Document{
 		Version: DocumentVersion,
 		Machines: []Machine{{
-			ID: machineID("m1"), State: Ready, CreatedAt: regBase,
+			ID: machineID("m1"), Name: "name-m1", State: Ready, CreatedAt: regBase,
 			Deadline: regBase.Add(time.Hour), Since: regBase,
 		}},
 	}
@@ -644,6 +645,11 @@ func TestSnapshotReportsTheDeadline(t *testing.T) {
 	if got, want := snap.Machines[0].Deadline, regBase.Add(f.cfg.MaxLifetime); !got.Equal(want) {
 		t.Fatalf("Deadline = %s, want %s", got, want)
 	}
+	// The name is in the snapshot because it is what an operator types into a console
+	// or a tailnet to find the machine the id belongs to.
+	if got, want := snap.Machines[0].Name, "name-m1"; got != want {
+		t.Fatalf("Name = %q, want %q", got, want)
+	}
 }
 
 // --- stubs ---------------------------------------------------------------
@@ -664,9 +670,9 @@ func (stubCloud) Delete(context.Context, MachineID) error              { return 
 
 type stubNetwork struct{}
 
-func (stubNetwork) Joined(context.Context, MachineID) (bool, error)     { return false, nil }
-func (stubNetwork) NodeExists(context.Context, MachineID) (bool, error) { return false, nil }
-func (stubNetwork) Forget(context.Context, MachineID) error             { return nil }
+func (stubNetwork) Joined(context.Context, string) (bool, error)     { return false, nil }
+func (stubNetwork) NodeExists(context.Context, string) (bool, error) { return false, nil }
+func (stubNetwork) Forget(context.Context, string) error             { return nil }
 
 type stubSyncer struct{}
 

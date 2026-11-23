@@ -56,10 +56,12 @@ type Spec struct {
 	// how the orphan sweep tells its machines from someone else's.
 	Labels map[string]string
 
-	// Name is the provider's name for the machine, if the caller wants one. Empty
-	// means "generate something unique", because the API requires names to be
-	// unique within a project and a constant one silently limits a project to a
-	// single machine. Firefly never reads the name back: identity is the id.
+	// Name is the machine's name, which is also what the network knows it by.
+	//
+	// Callers leave it empty: Provision mints one (see "What a node is called" in
+	// docs/firefly.md) and sets it here, because the provider requires a name at
+	// creation and the mesh has no other way to be asked about a machine. A
+	// caller-supplied name is honoured, and refused if it is already taken.
 	Name string
 }
 
@@ -69,8 +71,16 @@ type Spec struct {
 // machine is usable when this reports Running *and* the network says it joined;
 // each half has its own way of lying, which is why neither is trusted alone.
 type CloudMachine struct {
-	ID        MachineID
-	Status    ProviderStatus
+	ID     MachineID
+	Status ProviderStatus
+
+	// Name is the machine's name as the provider reports it, and is what the
+	// network is asked about. It is carried here for one reason: adoption. A
+	// machine found in a listing that the document does not know cannot be asked
+	// about by name unless the listing says what the name is, and a name firefly
+	// invented for an adopted machine would never match the node it actually has.
+	Name string
+
 	Labels    map[string]string
 	PublicIP  string
 	CreatedAt time.Time

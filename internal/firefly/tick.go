@@ -106,8 +106,29 @@ func (f *Firefly) Tick(ctx context.Context, now time.Time) (Result, error) {
 			continue
 		}
 
+		// Adoption is the one path where the name comes from the provider rather
+		// than from a mint, and it has to: the node this machine actually has is
+		// keyed on the name it was created with, so a name invented here would be a
+		// machine firefly could never ask the network about.
+		//
+		// An unnamed or duplicated machine is therefore a fact to report rather than
+		// to paper over. Guessing would produce a document Validate refuses, every
+		// tick, forever; a duplicate name means two machines sharing one node record
+		// and a delete that looks like it deleted both. The check sits after the cap
+		// above on purpose: a machine past its deadline is swept by id, which needs no
+		// name, and a tick that refused to sweep would be the one thing the cap exists
+		// to prevent.
+		if cm.Name == "" {
+			return Result{}, fmt.Errorf("firefly: the provider reported machine %s without a name, and the network is keyed on it", cm.ID)
+		}
+		if next.nameTaken(cm.Name) {
+			return Result{}, fmt.Errorf("firefly: the provider reported machine %s named %q, which the document already uses for another machine",
+				cm.ID, cm.Name)
+		}
+
 		next.Machines = append(next.Machines, Machine{
 			ID:        cm.ID,
+			Name:      cm.Name,
 			State:     Provisioning,
 			CreatedAt: cm.CreatedAt,
 			Deadline:  cm.CreatedAt.Add(f.cfg.MaxLifetime),
@@ -258,9 +279,9 @@ func (f *Firefly) step(ctx context.Context, doc *Document, m *Machine, now time.
 
 		// Ready is two facts, and the network one is what a stalled cloud-init
 		// cannot fake. A provider saying running is not a machine you can use.
-		joined, err := f.cfg.Network.Joined(ctx, m.ID)
+		joined, err := f.cfg.Network.Joined(ctx, m.Name)
 		if err != nil {
-			return TransitionEvent{}, fmt.Errorf("firefly: asking whether %s joined: %w", m.ID, err)
+			return TransitionEvent{}, fmt.Errorf("firefly: asking whether %s joined: %w", m.Name, err)
 		}
 		if cm.Status == ProviderRunning && joined {
 			return move(Answered)
@@ -315,9 +336,9 @@ func (f *Firefly) step(ctx context.Context, doc *Document, m *Machine, now time.
 			return TransitionEvent{}, fmt.Errorf("firefly: describing %s: %w", m.ID, err)
 		}
 
-		nodeExists, err := f.cfg.Network.NodeExists(ctx, m.ID)
+		nodeExists, err := f.cfg.Network.NodeExists(ctx, m.Name)
 		if err != nil {
-			return TransitionEvent{}, fmt.Errorf("firefly: asking about the node for %s: %w", m.ID, err)
+			return TransitionEvent{}, fmt.Errorf("firefly: asking about the node for %s: %w", m.Name, err)
 		}
 
 		switch {
@@ -328,7 +349,7 @@ func (f *Firefly) step(ctx context.Context, doc *Document, m *Machine, now time.
 			// The machine half is done and the node record outlived it. Repair it,
 			// rather than waiting for a record that will never clear itself -- a
 			// design that only observes here cycles TERMINATING and ERROR forever.
-			if err := f.cfg.Network.Forget(ctx, m.ID); err != nil {
+			if err := f.cfg.Network.Forget(ctx, m.Name); err != nil {
 				return fail(Terminating, err)
 			}
 			// Still Terminating; the next tick sees the record gone and confirms.

@@ -21,7 +21,8 @@ internal/
     fsm.go                    the transition table, as data
     fsm_test.go               one case per transition — enforced (see "Gates")
     cloud.go                  the Cloud interface: provider facts, never pushed
-    network.go                the Network interface: join, node presence, forget
+    network.go                the Network interface: join, node presence, forget,
+                              all keyed on the machine's name
     lease.go
     lease_test.go             table-driven: happy/, sad/, bad/
     document.go               the durable state: machines, leases, validation
@@ -29,6 +30,7 @@ internal/
     store.go                  the Store interface and an in-memory implementation
     store_test.go             round-trip, rejected writes, copy isolation, race
     firefly.go                the mechanism: config, leases, snapshot
+    name.go                   machine names: the prefix, the counter, uniqueness
     tick.go                   the reconcile loop, the orphan sweep, Result
     tick_test.go              the whole lifecycle against the shared fakes
     sync.go                   the Syncer boundary: saving the machine's own state
@@ -165,6 +167,14 @@ node that lingers on a private network" reproducible rather than theoretical.
 
 Both halves now exist, in one package on one clock, which is what makes the lingering-node case
 expressible: the provider can forget a machine while the network still holds its record.
+
+The network half is keyed on the machine's **name**, and this is the one place the fake cannot
+police the join: it resolves a name against its own machine records, so it answers happily for any
+name it happens to agree with — including a provider id, which is the question that was
+unanswerable before the rekey. So the fake records both halves (`Cloud.Specs()` is every create
+request, `Network.Asked()` is every name the three methods were handed) and one test compares them.
+That is `TestNamesJoinTheProviderAndTheNetwork`, and it is the shape to reach for whenever two
+interfaces are joined by a value neither of them mints.
 
 ## The clock
 

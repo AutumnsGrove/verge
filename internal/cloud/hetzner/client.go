@@ -315,6 +315,7 @@ func convert(s apiServer) (firefly.CloudMachine, error) {
 
 	return firefly.CloudMachine{
 		ID:        machineID(s.ID),
+		Name:      s.Name,
 		Status:    status,
 		Labels:    s.Labels,
 		PublicIP:  s.PublicNet.IPv4.IP,
@@ -339,12 +340,13 @@ func convertStatus(status string) (firefly.ProviderStatus, error) {
 
 // serverName returns the name to give a machine.
 //
-// The API requires a name, requires it to be a valid hostname, and requires it to
-// be *unique within the project*. A constant name therefore does not merely look
-// untidy: it means the second machine in a project is rejected with
-// uniqueness_error, and a caller can manage exactly one machine forever. Firefly
-// never reads the name back -- identity is the provider id -- so uniqueness is the
-// only property that matters, and a random suffix is the cheapest way to get it.
+// Firefly always supplies one: it mints the name, records it, and the network is
+// asked about the machine by it, so the name is the join between the two halves of
+// readiness and of deletion (docs/firefly.md, "What a node is called"). The
+// fallback is for a caller using this client without firefly, and it is random
+// rather than constant because the API requires the name to be *unique within the
+// project*: a constant one does not merely look untidy, it means the second machine
+// in a project is rejected with uniqueness_error.
 func serverName(requested string) (string, error) {
 	if requested != "" {
 		if !validHostname(requested) {

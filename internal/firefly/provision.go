@@ -17,6 +17,14 @@ import (
 // machine.
 var ErrProvisioningBackoff = errors.New("firefly: provisioning is backing off after a failed create")
 
+// ErrNameTaken means the caller asked for a name that a machine in the document
+// already has.
+//
+// It is refused before the machine is created, not after: two machines sharing a
+// name share one node record, so the network could not tell them apart -- and a
+// create that succeeded would have to be deleted again to stay consistent.
+var ErrNameTaken = errors.New("firefly: a machine with that name already exists")
+
 // Provision creates a machine and records it as PROVISIONING.
 //
 // It is the ABSENT --Need--> PROVISIONING row. Placement has already happened:
@@ -37,6 +45,19 @@ func (f *Firefly) Provision(ctx context.Context, spec Spec, now time.Time) (Mach
 		return "", fmt.Errorf("%w: next attempt after %s (%v)",
 			ErrProvisioningBackoff, f.createRetryAt.Format(time.RFC3339), f.createErr)
 	}
+
+	// The name is decided here, before Create, because the provider has to be told
+	// it at creation and the network is keyed on it afterwards. The counter and the
+	// machines it must not collide with are both in the document, so the mint works
+	// on the copy that will be saved rather than on the live one.
+	next := f.doc.Clone()
+	name := spec.Name
+	if name == "" {
+		name = f.mintName(&next)
+	} else if next.nameTaken(name) {
+		return "", fmt.Errorf("%w: %q", ErrNameTaken, name)
+	}
+	spec.Name = name
 
 	// The label is firefly's, not the caller's. A machine created without it is
 	// invisible to List, which means the orphan sweep cannot find it and the
@@ -62,9 +83,9 @@ func (f *Firefly) Provision(ctx context.Context, spec Spec, now time.Time) (Mach
 	f.createRetryAt = time.Time{}
 	f.createErr = nil
 
-	next := f.doc.Clone()
 	next.Machines = append(next.Machines, Machine{
 		ID:        id,
+		Name:      name,
 		State:     Provisioning,
 		CreatedAt: now,
 		Deadline:  now.Add(f.cfg.MaxLifetime),

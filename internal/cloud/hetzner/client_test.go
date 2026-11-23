@@ -19,7 +19,7 @@ const token = "test-token"
 // than when someone remembers.
 const serverJSON = `{
   "id": 42,
-  "name": "verge",
+  "name": "verge-machine-1",
   "status": %q,
   "created": "2026-11-22T12:00:00+00:00",
   "labels": {"verge": "machine"},
@@ -131,6 +131,11 @@ func TestDescribe(t *testing.T) {
 			if m.PublicIP != "10.0.0.42" {
 				t.Fatalf("PublicIP = %q", m.PublicIP)
 			}
+			// The name is what the network is asked about, so a Describe or List
+			// that drops it leaves adoption with a machine nothing can name.
+			if m.Name != "verge-machine-1" {
+				t.Fatalf("Name = %q, want verge-machine-1", m.Name)
+			}
 			if m.Labels["verge"] != "machine" {
 				t.Fatalf("Labels = %v", m.Labels)
 			}
@@ -182,6 +187,12 @@ func TestList(t *testing.T) {
 		}
 		if got[0].Status != firefly.ProviderRunning || got[1].Status != firefly.ProviderStopping {
 			t.Fatalf("statuses = %s, %s", got[0].Status, got[1].Status)
+		}
+		// A listing is how an adopted machine learns its own name; one that dropped
+		// it would leave the orphan sweep holding a machine the network cannot be
+		// asked about.
+		if got[0].Name != "verge-machine-1" || got[1].Name != "" {
+			t.Fatalf("names = %q, %q", got[0].Name, got[1].Name)
 		}
 	})
 
