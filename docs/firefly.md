@@ -688,10 +688,13 @@ hostname, because that is the only name a tailnet knows. So a machine must join 
 minted for it: the rendered cloud-init has to set the hostname to `Spec.Name`, and the enrolment key has
 to be `preauthorized` or the device waits for a human. Neither the cloud-init renderer nor the key
 minter exists yet, so nothing in the tree enforces either — and the failure mode is quiet in the wrong
-way: a machine that joins under the image's default hostname is a machine nothing can find, so it sits
-`PROVISIONING` until `BootDeadline` destroys it and is reprovisioned into the same hole. The
-requirement is written here and in the package doc so the renderer PR has something to be checked
-against rather than something to rediscover.
+way. A machine that joins under the image's default hostname is a machine nothing can find, so
+`BootDeadline` moves it to `ERROR`, the retry puts it back in `PROVISIONING`, and only the `MaxLifetime`
+cap actually destroys it (through `Capped → Syncing → beginTeardown`, with a no-op save because it never
+reached `READY`). Getting this wrong therefore costs a machine booting on a loop until its cap, and then
+the next mint into the same hole — not one clean failure a human would notice. The requirement is
+written here and in the package doc so the renderer PR has something to be checked against rather than
+something to rediscover.
 
 Two smaller consequences worth naming because they are the sort of thing a reviewer should not have to
 rediscover:

@@ -11,11 +11,12 @@
 // the name firefly minted for its machine. This package matches a device by its
 // hostname (falling back to the first label of its MagicDNS name), because that is
 // the only name a tailnet knows — so a machine that joins under the image's default
-// hostname is a machine nothing will ever find, and it will sit `PROVISIONING` until
-// the boot deadline destroys it. The requirement is the *renderer's*: the script must
-// set the hostname to firefly.Spec.Name, and the enrolment key must be
-// `preauthorized` or the device waits for a human. Both belong to that PR, and this
-// is the sentence to check it against.
+// hostname is a machine nothing will ever find: `BootDeadline` moves it to `ERROR`,
+// the retry puts it back in `PROVISIONING`, and only the `MaxLifetime` cap destroys
+// it, after which the next mint lands in the same hole. The requirement is the
+// *renderer's*: the script must set the hostname to firefly.Spec.Name, and the
+// enrolment key must be `preauthorized` or the device waits for a human. Both belong
+// to that PR, and this is the sentence to check it against.
 //
 // Everything here is request/response against an injected *http.Client, so the unit
 // tier runs against httptest and the contract tier swaps in a real API token behind
