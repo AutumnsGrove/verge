@@ -103,7 +103,7 @@ are behind build tags and run in CI.
 |---|---|---|---|---|
 | static | `make vet` | nothing | seconds | vet, staticcheck, gofmt |
 | unit + integration | `go test ./...` | nothing | < 5 s | everything reachable without a cloud |
-| contract | `go test -tags contract ./internal/cloud/...` | a **separate** Hetzner project, R2, a tailnet key | ~6 min | a real machine boots, joins, leases, syncs, destroys |
+| contract | `make contract` | a **separate** Hetzner project, R2, a tailnet key | seconds while read-only | the three clients, against the real APIs |
 | full | `go test -tags e2e ./e2e` | the above plus a model provider | ~12 min | one real session, end to end, and a resume |
 
 The middle tier is the biggest slice of the suite, and it means **integration**, not unit: the real
