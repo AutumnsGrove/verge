@@ -28,6 +28,8 @@ import (
 // A model would let the test agree with itself; the point is to compare firefly's
 // reported transitions against the parts of the world it does not control: the
 // syncer's record of successful saves and the provider's record of deletes.
+// Both are read, and the provider half is what catches a transition that claims a
+// delete without issuing one -- or an issued delete nobody reported.
 //
 // It is per-history rather than shared, because "no save failed in this history"
 // is a claim about this history.
@@ -110,6 +112,14 @@ func (l *ledger) observe(t tb, h *harness, res firefly.Result) {
 			t.Fatalf("machine %s was removed from the document without a delete", id)
 		}
 		l.confirmed++
+	}
+
+	// The provider's own count is the second record, and it is the independent one:
+	// a transition that entered Terminating without calling Delete, or a Delete
+	// nothing reported, is invisible to a ledger built only from firefly's side.
+	// One delete per teardown is the design, so the two must agree exactly.
+	if _, _, _, providerDeletes := h.cloud.Calls(); providerDeletes != l.deletes {
+		t.Fatalf("the provider recorded %d deletes and firefly reported %d", providerDeletes, l.deletes)
 	}
 }
 
