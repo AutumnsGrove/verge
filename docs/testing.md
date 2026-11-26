@@ -59,6 +59,12 @@ internal/
   store/r2/
     store.go                  the state document in object storage, one object
     store_test.go             round trip, absent vs broken, against a real S3 client
+    workspace.go              a machine's workspace as one object: the syncer's sink
+    workspace_test.go         the request it sends, and the keys it refuses
+  syncer/
+    syncer.go                 fetch, spool, store: what "saved" means, and the cap
+    syncer_test.go            the cap's boundary, an empty fetch, a gone machine,
+                              a silent one, and ids that cannot be object keys
   net/tailnet/
     client.go                 the real Network: observe, forget (joining is cloud-init)
     client_test.go            against httptest: the two facts, ambiguity, idempotent forget

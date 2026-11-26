@@ -594,6 +594,25 @@ usually resolves itself. That distinction is the same one the whole design rests
 that can spend money never reaches the runner; a credential that can only join a private network
 may.
 
+### What the real Syncer saves
+
+The first real implementation is `internal/syncer`, and its shape is an operator decision recorded here:
+a machine tars its own workspace, the control plane ships those bytes to R2, and the object is keyed
+`<prefix>/<machine-id>.tar`. A git bundle was the alternative and was refused because it loses
+untracked files; a transcript bundle is deferred rather than refused, since the workspace is the part
+that cannot be regenerated.
+
+Three things the specification left open, settled in the package's own doc rather than repeated here:
+the transport is a `Fetcher` interface because getting bytes off a machine about to be destroyed needs
+an agent that does not exist yet; the workspace is spooled to a file rather than buffered, because S3
+wants a length and a gigabyte must not live in memory; and an empty fetch is a successful no-op
+because that is what the contract says for a machine that never became ready. Everything else is an
+error, including a machine that cannot be reached — a machine with nothing on it and a machine we could
+not ask are the two cases whose confusion loses the work.
+
+`internal/store/r2` holds the other half, `Workspace`, which is a sink and not a store: it shares the
+bucket and the narrowed S3 client with the state document and shares no key scheme with it.
+
 ### What a node is called
 
 A tailnet knows devices by name; the provider knows machines by an id it mints at
