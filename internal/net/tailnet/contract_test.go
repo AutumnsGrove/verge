@@ -18,13 +18,21 @@ import (
 //
 // A missing credential skips with a stated reason (docs/testing.md).
 
+// client builds the real client, or skips and says what is missing. VERGE_TAILNET_NAME
+// is optional and its absence is stated rather than silent: the client falls back to
+// the token's default tailnet, and "which tailnet did that ask" is the first question
+// a surprising pass or fail raises.
 func client(t *testing.T) *tailnet.Client {
 	t.Helper()
 	tok := os.Getenv("VERGE_TAILNET_TOKEN")
 	if tok == "" {
 		t.Skip("contract: VERGE_TAILNET_TOKEN is not set, so there is no tailnet to ask")
 	}
-	return tailnet.New(tok, tailnet.WithTailnet(os.Getenv("VERGE_TAILNET_NAME")))
+	name := os.Getenv("VERGE_TAILNET_NAME")
+	if name == "" {
+		t.Logf("contract: VERGE_TAILNET_NAME is not set, so this asks the token's default tailnet")
+	}
+	return tailnet.New(tok, tailnet.WithTailnet(name))
 }
 
 // TestContractNodeDoesNotExist is the two facts this client exists to report, from

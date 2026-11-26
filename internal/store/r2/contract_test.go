@@ -4,7 +4,9 @@ package r2_test
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"reflect"
 	"testing"
 	"time"
 
@@ -16,10 +18,14 @@ import (
 	"github.com/AutumnsGrove/verge/internal/store/r2"
 )
 
-// The real bucket, round-tripping a document under a key of its own: overwriting
-// "contract-state.json" each run is the whole cleanup, because the narrowed
-// ObjectAPI has no DeleteObject and a contract test that tidied up by deleting is a
-// contract test whose tidying-up is the risk.
+// The real bucket, round-tripping a document under a key of its own.
+//
+// The key carries a per-run suffix rather than being a fixed name, because two runs
+// at once -- a developer and CI, or two CI jobs -- would otherwise read back each
+// other's document and call it a round trip. Nothing is deleted, since the narrowed
+// ObjectAPI has no DeleteObject and a test that tidied up by deleting is a test whose
+// tidying-up is the risk; the run therefore leaves one small object, and the bucket
+// this uses wants a lifecycle rule rather than a cleanup routine.
 //
 // Missing configuration skips with the reason named (docs/testing.md).
 
@@ -47,7 +53,8 @@ func store(t *testing.T) *r2.Store {
 		o.UsePathStyle = true
 	})
 
-	s, err := r2.New(r2.Config{Bucket: env["VERGE_R2_BUCKET"], Key: "contract-state.json", API: api})
+	key := fmt.Sprintf("contract-state-%d.json", time.Now().UnixNano())
+	s, err := r2.New(r2.Config{Bucket: env["VERGE_R2_BUCKET"], Key: key, API: api})
 	if err != nil {
 		t.Fatalf("r2.New: %v", err)
 	}
@@ -65,18 +72,28 @@ func TestContractRoundTrip(t *testing.T) {
 
 	s := store(t)
 
+	// Every field the document has, with the Error record populated: a round trip
+	// that preserved only the name and the state would pass the assertions this
+	// replaces, and the fields it skipped are the ones a restart rebuilds its
+	// decisions from.
+	base := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
 	doc := firefly.Document{
 		Version:           firefly.DocumentVersion,
-		NextLeaseNumber:   1,
-		NextMachineNumber: 2,
+		NextLeaseNumber:   7,
+		NextMachineNumber: 3,
 		Machines: []firefly.Machine{{
 			ID:           firefly.MachineID("hetzner:99999999999"),
 			Name:         "verge-contract-1",
-			State:        firefly.Ready,
-			CreatedAt:    time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC),
-			Deadline:     time.Date(2026, 11, 22, 16, 0, 0, 0, time.UTC),
-			Since:        time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC),
+			State:        firefly.Error,
+			Origin:       firefly.Syncing,
+			CreatedAt:    base,
+			Deadline:     base.Add(4 * time.Hour),
+			Since:        base.Add(90 * time.Minute),
 			ReachedReady: true,
+			Failures:     3,
+			Attempt:      2,
+			LastErr:      "the save could not succeed",
+			RetryAt:      base.Add(95 * time.Minute),
 		}},
 	}
 	if err := s.Save(ctx, doc); err != nil {
@@ -87,10 +104,21 @@ func TestContractRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load against the real bucket: %v", err)
 	}
-	if got.Version != doc.Version || got.NextLeaseNumber != doc.NextLeaseNumber || got.NextMachineNumber != doc.NextMachineNumber {
-		t.Fatalf("document round trip lost bookkeeping: got %+v, want %+v", got, doc)
+	if want, have := normalise(doc), normalise(got); !reflect.DeepEqual(have, want) {
+		t.Fatalf("document round trip:\n got %+v\nwant %+v", have, want)
 	}
-	if len(got.Machines) != 1 || got.Machines[0].Name != doc.Machines[0].Name || got.Machines[0].State != doc.Machines[0].State {
-		t.Fatalf("document round trip lost the machine: got %+v", got.Machines)
+}
+
+// normalise puts every instant in UTC so a comparison can be about the instant
+// rather than about which location a JSON decoder chose. It is the only reason this
+// file mentions DeepEqual: every other field must match exactly, which is the point.
+func normalise(doc firefly.Document) firefly.Document {
+	for i := range doc.Machines {
+		m := &doc.Machines[i]
+		m.CreatedAt = m.CreatedAt.UTC()
+		m.Deadline = m.Deadline.UTC()
+		m.Since = m.Since.UTC()
+		m.RetryAt = m.RetryAt.UTC()
 	}
+	return doc
 }
