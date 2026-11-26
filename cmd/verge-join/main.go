@@ -20,15 +20,18 @@
 //     own words in the error, instead of as a machine that booted and quietly did
 //     nothing. A real join needs a real tailnet, so it belongs to the e2e tier; this
 //     package's tests cover what can be covered without one.
+//
 //   - **Tailscale SSH is enabled at join time** (`--ssh`). The control plane reaches a
 //     machine over ssh, so a machine that joined without it is a machine that boots,
 //     becomes READY, and then cannot be saved. Enabling it here is what makes the
 //     transport's assumption true rather than hoped for.
+//
 //   - **Joining is verified, not assumed.** `tailscale up` returning zero means the CLI
 //     accepted the request, not that the node is connected; the join polls
 //     `tailscale status` until the backend reports Running, and fails cloud-init if it
 //     never does. A machine that boots and silently never joins looks exactly like a
 //     machine that never booted, and that ambiguity costs a boot deadline to discover.
+//
 //   - **The hostname is passed explicitly.** The tailnet matches devices by hostname,
 //     and firefly asks the network about the name it minted.
 package main
