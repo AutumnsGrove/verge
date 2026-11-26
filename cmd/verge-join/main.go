@@ -194,6 +194,12 @@ func running(statusJSON []byte) bool {
 // third gate rather than the first -- but it is also what keeps a name with a space in
 // it from arriving as two arguments, and it costs a few lines.
 func host(name string) (string, error) {
+	if name == "" {
+		// The caller checks for a blank hostname before this, and the validator still
+		// refuses one: a validator that only rejects what its current caller happens to
+		// pass is a validator with an unstated precondition. The fuzzer found this.
+		return "", fmt.Errorf("%w: hostname is empty", errJoinFile)
+	}
 	if len(name) > 253 {
 		return "", fmt.Errorf("%w: hostname is too long", errJoinFile)
 	}
