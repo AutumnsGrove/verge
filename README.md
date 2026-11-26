@@ -23,8 +23,11 @@ real API: the unit tier runs it against `httptest`, and the contract tier that w
 does not exist yet. The tailnet client and the R2 state store exist and are tested against `httptest`,
 and neither has been pointed at real infrastructure. The cloud-init renderer exists and is fuzzed, and the enrolment-key minter it
 feeds exists, but nothing composes the two yet. `internal/syncer` saves a machine's workspace as one
-tarball in R2; the machine-side half — an agent that streams it over the tailnet — is not written, so
-a save currently fails loudly instead of quietly destroying the machine it could not save.
+tarball in R2, and `internal/syncer/ssh` fetches it by running one command on the machine over
+Tailscale SSH. What is still missing is the machine side of that contract: the image has to provide
+`/usr/local/bin/verge-save`, the sibling of the `verge-join` the renderer already assumes. Until it
+does, a save fails with the command's own error rather than quietly destroying a machine it could not
+save — which is the behaviour the ordering guarantee asks for.
 `cmd/verge` reconciles on a timer: it builds the clients, calls `Tick` on every interval, and finishes
 the pass in flight when it is interrupted. It does not provision anything yet — placement, the caller
 that decides when work needs a machine, is still to come. `docs/testing.md` names the files the rest
