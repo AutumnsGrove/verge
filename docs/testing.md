@@ -79,7 +79,7 @@ internal/
     key_test.go               the request it sends, and the rendering it feeds
     contract_test.go          //go:build contract — a real tailnet, read-only
   rpc/relay/
-    relay.go                  the pi JSONL reader
+    relay.go                  the pi JSONL reader and writer
     relay_test.go
     relay_fuzz_test.go        FuzzRelay — the highest-value target
   proxy/
@@ -317,7 +317,7 @@ Committed `bad/` cases:
 | proxy | usage missing, or a string where a number belongs, does not crash the ledger |
 | relay | `U+2028` and `U+2029` inside a JSON string are not record boundaries |
 | relay | a frame split mid-UTF-8 rune |
-| relay | a 10 MB line does not allocate unbounded |
+| relay | a line over the record limit is refused rather than accumulated |
 | patch | a diff header escaping the working directory is refused |
 | template | a repo URL containing a newline, quote, or `$` never escapes its YAML block |
 | attention | an extension entry claiming a state outside the enum is rejected |
