@@ -1,7 +1,7 @@
 # The targets docs/testing.md names. The fast ones are offline; the tier that
 # needs a vulnerability database is separate, because it is the one target here
 # that cannot be run with the network switched off.
-.PHONY: all vet vuln test race check contract e2e
+.PHONY: all vet vuln test race check contract e2e dist
 
 all: check
 
@@ -35,6 +35,20 @@ race:
 # What a pull request must pass before review: everything that works with the
 # network unplugged.
 check: vet race
+
+# The binaries the image bakes in, cross-compiled for linux, plus checksums. The
+# release workflow runs this exact target and uploads dist/, so an image is never built
+# from something a developer cannot reproduce -- and a broken cross-build is a pull
+# request failure rather than a release-day discovery.
+#
+# CGO off is not a preference: a static binary needs no libc on the box, which is what
+# makes "the image provides verge-join" a copy rather than a dependency graph.
+VERSION ?= $(shell git describe --tags --always --dirty)
+ARCHS ?= amd64 arm64
+dist:
+	rm -rf dist
+	@set -e; for arch in $(ARCHS); do 	  dir=dist/verge-$(VERSION)-linux-$$arch; 	  mkdir -p $$dir; 	  for cmd in verge verge-join verge-save; do 	    echo "building $$cmd for linux/$$arch"; 	    CGO_ENABLED=0 GOOS=linux GOARCH=$$arch go build -trimpath -ldflags "-s -w" -o $$dir/$$cmd ./cmd/$$cmd; 	  done; 	  tar -C dist -czf $$dir.tar.gz $$(basename $$dir); 	done
+	cd dist && ls *.tar.gz | xargs shasum -a 256 > SHA256SUMS
 
 # The tier that needs real infrastructure: a Hetzner project, an R2 bucket and a
 # tailnet key. Every test in it skips with a stated reason when its credential is

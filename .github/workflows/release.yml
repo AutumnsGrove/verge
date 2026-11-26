@@ -1,0 +1,47 @@
+# The release the image is built from: static linux binaries plus checksums.
+#
+# A tag is the trigger, and the workflow runs the same `make dist` a developer runs,
+# so an image is never built from a binary nobody can reproduce. `make race` runs
+# first: publishing untested binaries is the one failure that cannot be undone by a
+# follow-up commit.
+#
+# Nothing here needs a secret. The release is created with the workflow's own token
+# and `contents: write`, which is the smallest scope that can create one.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history, because `make dist` names the version with `git describe`,
+          # and a shallow clone cannot see the tag that triggered this run.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The unit tier under the race detector, on exactly the tree being released.
+      - run: make race
+
+      - run: make dist
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/*.tar.gz dist/SHA256SUMS \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes
