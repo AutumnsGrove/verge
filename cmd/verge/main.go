@@ -63,6 +63,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	releaseOnCancel(ctx, stop)
 
 	f, err := build(cfg)
 	if err != nil {
@@ -81,6 +82,20 @@ func run(args []string, getenv func(string) string, stderr io.Writer) error {
 		return err
 	}
 	return l.Run(ctx)
+}
+
+// releaseOnCancel gives the default signal action back as soon as ctx is done.
+//
+// The first signal asks the loop to stop, and it is deliberately not allowed to
+// interrupt the pass in flight. That makes a second signal the operator's exit from
+// a pass that is stuck, so the handler is released the moment the first one lands:
+// a swallowed Ctrl-C on a hung daemon is how someone reaches for SIGKILL and loses
+// the tick anyway. stop is idempotent, so the deferred call in run is free.
+func releaseOnCancel(ctx context.Context, stop func()) {
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
 }
 
 // build joins the four boundaries firefly needs onto one configuration.

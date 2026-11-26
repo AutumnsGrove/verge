@@ -2,10 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"flag"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // env is a complete environment, so a test that cares about one variable does not
@@ -87,5 +91,32 @@ func TestNoTransportIsAnError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "fake-001") {
 		t.Fatalf("Fetch = %v, want it to name the machine", err)
+	}
+}
+
+// TestReleaseOnCancelReleasesTheHandler covers the half of the signal wiring that
+// cannot be asserted by delivery without a subprocess: the handler is released when
+// the context ends, so the second signal is the default action rather than a
+// swallowed one.
+func TestReleaseOnCancelReleasesTheHandler(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	var calls atomic.Int64
+	released := make(chan struct{})
+	var once sync.Once
+
+	releaseOnCancel(ctx, func() {
+		calls.Add(1)
+		once.Do(func() { close(released) })
+	})
+
+	cancel()
+	select {
+	case <-released:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the handler was not released after the context ended: a second Ctrl-C would be swallowed")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("stop called %d times, want 1", got)
 	}
 }

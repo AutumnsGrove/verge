@@ -107,8 +107,8 @@ func (l *Loop) Run(ctx context.Context) error {
 	// -- the half-applied state firefly's ordering guarantee exists to prevent.
 	//
 	// A pass that hangs is therefore not bounded from here. It is bounded from
-	// outside: every client has its own timeout, and the process has its own
-	// deadline.
+	// outside: every client has its own timeout, and the daemon releases its signal
+	// handler on the first signal so that a second one terminates the process.
 	passCtx := context.WithoutCancel(ctx)
 
 	for {
