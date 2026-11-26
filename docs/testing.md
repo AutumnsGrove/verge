@@ -41,7 +41,7 @@ internal/
   cloud/hetzner/
     client.go                 the real client: four calls, no retries
     client_test.go            against httptest: decoding, 404s, status mapping
-    contract_test.go          //go:build contract — real API, test project (not written)
+    contract_test.go          //go:build contract — a real listing and a real 404
   cloud/fake/
     fake.go                   the provider half: state machine, clock, six faults
     network.go                the network half: node records that outlive machines
@@ -64,6 +64,7 @@ internal/
     store_test.go             round trip, absent vs broken, against a real S3 client
     workspace.go              a machine's workspace as one object: the syncer's sink
     workspace_test.go         the request it sends, and the keys it refuses
+    contract_test.go          //go:build contract — a document round trip, real bucket
   syncer/
     syncer.go                 fetch, spool, store: what "saved" means, and the cap
     syncer_test.go            the cap's boundary, an empty fetch, a gone machine,
@@ -73,7 +74,7 @@ internal/
     client_test.go            against httptest: the two facts, ambiguity, idempotent forget
     key.go                    the enrolment key: ephemeral, single-use, preauthorized
     key_test.go               the request it sends, and the rendering it feeds
-    contract_test.go          //go:build contract — a real tailnet key (not written)
+    contract_test.go          //go:build contract — a real tailnet, read-only
   rpc/relay/
     relay.go                  the pi JSONL reader
     relay_test.go
@@ -409,11 +410,16 @@ says which is which rather than describing all of it as though it runs.
 | weekly | a real `pi --mode rpc` transcript diffed against the committed golden | ~5 min | plan |
 | `workflow_dispatch` | full tier with any tier forced | — | plan |
 
-**No job needs a secret yet**, so all three run on fork pull requests with `contents: read`; there is
-nothing to skip and nothing to fail. That changes with the contract tier, which needs a Hetzner
-project and a tailnet key. When it lands it should be skipped *with a stated reason* on a fork
-rather than failed, so that a red X from a fork still reads as "skipped" and not "broken" — and
-this paragraph should be rewritten then, not left describing behaviour that has not been built.
+**No job needs a secret yet**, so all three run on fork pull requests with `contents: read`.
+
+The contract tests exist now, and every one of them skips with a stated reason when its credential is
+missing — `contract: VERGE_HETZNER_TOKEN is not set, so there is no project to talk to` — so a fork
+still reads as "skipped" rather than "broken". They are deliberately read-only and free: a listing
+against a label nothing uses, a `Describe` of an id no server can have, a node lookup for a name that
+is not in the tailnet, and a document round-trip under `contract-state.json`. Provisioning a real
+machine, which is what the tier table promises it covers, belongs to the e2e tier: there it is the
+thing under test rather than a side effect of checking a decoder, and it is the only part that costs
+money. Nothing schedules them yet — the workflow row above is still "plan".
 
 The Go workflow has no path filter: the suite is under a second, so deciding whether to run it would
 cost more than running it. Both the tools it installs are pinned, because an unpinned linter is a
