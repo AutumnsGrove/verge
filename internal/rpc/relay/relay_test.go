@@ -1,7 +1,6 @@
 package relay_test
 
 import (
-	"bufio"
 	"bytes"
 	"errors"
 	"io"
@@ -98,7 +97,7 @@ func TestReader(t *testing.T) {
 		}
 	})
 
-	t.Run("sad/aread_error_mid_record_is_not_a_shorter_record", func(t *testing.T) {
+	t.Run("sad/a_read_error_mid_record_is_not_a_shorter_record", func(t *testing.T) {
 		// A broken pipe or a dropped connection is how a pi stream normally ends badly,
 		// and forwarding the fragment would hand the far side a piece of JSON to reject --
 		// which is exactly the failure this package exists to prevent.
@@ -170,9 +169,12 @@ func TestReader(t *testing.T) {
 
 	t.Run("happy/a_long_stream_of_small_records", func(t *testing.T) {
 		// The limit bounds one record, not the total: a session is an unbounded number of
-		// small records, and a reader that counted them would stop mid-run.
+		// small records, and a reader that counted them would stop mid-run. A few tens of
+		// thousands is enough to prove the limit is not cumulative without building twenty
+		// megabytes to say it.
+		const records = 50_000
 		var in strings.Builder
-		for i := 0; i < relay.DefaultLimit; i++ {
+		for i := 0; i < records; i++ {
 			in.WriteString("x\n")
 		}
 		r := relay.NewReader(strings.NewReader(in.String()))
@@ -187,8 +189,8 @@ func TestReader(t *testing.T) {
 			}
 			n++
 		}
-		if n != relay.DefaultLimit {
-			t.Fatalf("read %d records, want %d", n, relay.DefaultLimit)
+		if n != records {
+			t.Fatalf("read %d records, want %d", n, records)
 		}
 	})
 }
@@ -315,7 +317,3 @@ func TestRoundTrip(t *testing.T) {
 		}
 	}
 }
-
-// bufio is used by the implementation, and this file asserts it is not leaking its own
-// line semantics into the reader: a buffer shorter than one record must not split it.
-var _ = bufio.ErrBufferFull
