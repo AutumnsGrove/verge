@@ -120,6 +120,35 @@ func TestWriteTar(t *testing.T) {
 		}
 	})
 
+	t.Run("happy/a_symlinked_root_is_the_workspace", func(t *testing.T) {
+		// The image may mount the workspace somewhere and link /workspace at it. A walk
+		// that lstats its first path would see a symlink, descend nowhere, and write a
+		// valid empty archive -- which the control plane reads as a finished save and
+		// destroys the machine over.
+		real := tree(t)
+		link := filepath.Join(t.TempDir(), "workspace")
+		must(t, os.Symlink(real, link))
+
+		var buf bytes.Buffer
+		if err := writeTar(&buf, link); err != nil {
+			t.Fatalf("writeTar through a symlinked root: %v", err)
+		}
+		got := entries(t, buf.Bytes())
+		if _, ok := got["repo/main.go"]; !ok {
+			t.Fatalf("the symlinked workspace saved nothing: entries = %v", names(got))
+		}
+	})
+
+	t.Run("bad/a_root_that_is_a_file", func(t *testing.T) {
+		f := filepath.Join(t.TempDir(), "not-a-directory")
+		must(t, os.WriteFile(f, []byte("x"), 0o644))
+
+		var buf bytes.Buffer
+		if err := writeTar(&buf, f); err == nil {
+			t.Fatal("writeTar with a file as the root = nil, want an error")
+		}
+	})
+
 	t.Run("happy/an_empty_workspace_is_a_valid_archive", func(t *testing.T) {
 		// The control plane treats zero bytes as "nothing to save"; a valid empty tar
 		// is "an empty workspace", which is a different and equally true statement.

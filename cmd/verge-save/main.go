@@ -57,9 +57,24 @@ func main() {
 // would be slower and would test less.
 func writeTar(w io.Writer, root string) error {
 	root = filepath.Clean(root)
-	if _, err := os.Stat(root); err != nil {
+
+	// The root is resolved before the walk, and this is load-bearing rather than tidy.
+	// os.Stat follows a symlink but filepath.WalkDir lstats its first path, so a
+	// /workspace that is a link to a mounted volume would walk zero entries and produce
+	// a valid, empty archive -- which the control plane reads as "the workspace was
+	// saved" and destroys the machine over. Resolving makes the walk start where the
+	// content actually is; names are still relative to the workspace, because they are
+	// relative to the resolved root.
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil {
 		return fmt.Errorf("the workspace is not there: %w", err)
 	}
+	if info, err := os.Stat(resolved); err != nil {
+		return fmt.Errorf("the workspace is not there: %w", err)
+	} else if !info.IsDir() {
+		return fmt.Errorf("the workspace %s is a %s, not a directory", root, info.Mode().Type())
+	}
+	root = resolved
 
 	tw := tar.NewWriter(w)
 
