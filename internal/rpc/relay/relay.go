@@ -54,6 +54,12 @@ var ErrRecordEndsWithCR = errors.New("relay: a record cannot end with a CR")
 type Reader struct {
 	br    *bufio.Reader
 	limit int
+
+	// dead is set when the stream cannot be resynchronised, and is returned by every
+	// later call. An over-limit record is recovered from by discarding to the next LF;
+	// a stream that keeps producing them is not a stream this package can be in step
+	// with, and a fragment of JSON is worse than an error.
+	dead error
 }
 
 // NewReader returns a Reader with DefaultLimit.
@@ -81,6 +87,10 @@ func NewReaderLimit(r io.Reader, limit int) *Reader {
 // record means; a caller that rejects empty records can, without this package having
 // invented a rule the protocol does not have.
 func (r *Reader) Next() ([]byte, error) {
+	if r.dead != nil {
+		return nil, r.dead
+	}
+
 	var rec []byte
 
 	for {
@@ -97,6 +107,12 @@ func (r *Reader) Next() ([]byte, error) {
 			// before it is accumulated, and a mutation that removes it is invisible to
 			// any test by construction.
 			if len(rec) > r.limit+1 {
+				// The record is refused, and the stream is resynchronised before the error
+				// is returned: a caller that logs and reads on must get the record after
+				// the bad one, not the tail of the bad one.
+				if !r.resync() {
+					r.dead = fmt.Errorf("%w: over %d bytes, and the stream could not be resynchronised", ErrRecordTooLong, r.limit)
+				}
 				return nil, fmt.Errorf("%w: over %d bytes", ErrRecordTooLong, r.limit)
 			}
 			continue
@@ -134,6 +150,26 @@ func (r *Reader) finish(rec []byte) ([]byte, error) {
 		return nil, fmt.Errorf("%w: over %d bytes", ErrRecordTooLong, r.limit)
 	}
 	return rec, nil
+}
+
+// resync discards the rest of a record that was refused, up to a second limit.
+//
+// Bounded on purpose: a machine that writes one enormous line is worth recovering from,
+// and a machine that writes nothing but enormous lines is not. It reports whether the
+// stream is back in step -- true when a LF was found, false when the bound was hit first.
+func (r *Reader) resync() bool {
+	left := r.limit
+	for left > 0 {
+		chunk, err := r.br.ReadSlice('\n')
+		if err == nil {
+			return true // the newline ends the refused record
+		}
+		if !errors.Is(err, bufio.ErrBufferFull) {
+			return false // EOF or a read error: there is no stream left to be in step with
+		}
+		left -= len(chunk)
+	}
+	return false
 }
 
 // stripCR removes the carriage return that CRLF framing leaves behind.

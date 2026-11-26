@@ -142,6 +142,47 @@ func TestReader(t *testing.T) {
 		}
 	})
 
+	t.Run("sad/the_reader_resumes_after_an_oversized_record", func(t *testing.T) {
+		// A caller that logs the error and reads on must get the next record, not the tail
+		// of the refused one: a fragment of JSON forwarded as a record is the failure this
+		// package exists to prevent.
+		// 4100 bytes, because the fragment only appears when the refused record is longer
+		// than bufio's 4 KiB buffer and the remainder after the refusal is short enough to
+		// fit the limit: the first fragment of 4096 is refused, and the four bytes after it
+		// would then read back as a record of their own.
+		const limit = 16
+		r := relay.NewReaderLimit(strings.NewReader(strings.Repeat("x", 4100)+"\n"+"{\"ok\":true}\n"), limit)
+
+		if _, err := r.Next(); !errors.Is(err, relay.ErrRecordTooLong) {
+			t.Fatalf("first Next = %v, want %v", err, relay.ErrRecordTooLong)
+		}
+		rec, err := r.Next()
+		if err != nil {
+			t.Fatalf("second Next = %v, want the record after the refused one", err)
+		}
+		if string(rec) != `{"ok":true}` {
+			t.Fatalf("second Next = %q, want the record after the refused one", rec)
+		}
+	})
+
+	t.Run("sad/a_stream_that_cannot_be_resynchronised_is_dead", func(t *testing.T) {
+		// A machine that writes one enormous line is worth recovering from; one that is
+		// still mid-line a whole limit later is not, and every later call must say so
+		// rather than hand back pieces of it.
+		const limit = 16
+		r := relay.NewReaderLimit(strings.NewReader(strings.Repeat("x", 5000)), limit)
+
+		if _, err := r.Next(); !errors.Is(err, relay.ErrRecordTooLong) {
+			t.Fatalf("first Next = %v, want %v", err, relay.ErrRecordTooLong)
+		}
+		if _, err := r.Next(); !errors.Is(err, relay.ErrRecordTooLong) {
+			t.Fatalf("second Next = %v, want the same refusal from a dead stream", err)
+		}
+		if _, err := r.Next(); !errors.Is(err, relay.ErrRecordTooLong) {
+			t.Fatalf("third Next = %v, want the same refusal", err)
+		}
+	})
+
 	t.Run("sad/a_record_longer_than_the_read_buffer", func(t *testing.T) {
 		// This is the accumulate path: a record that does not fit in bufio's buffer, so it
 		// arrives in fragments. The observable outcome is the same refusal as a short one,
