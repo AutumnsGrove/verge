@@ -94,9 +94,12 @@ internal/
                               lapse, a failed start, an orderly close, a cancelled caller
     fuzz_test.go              FuzzValidID — the id becomes an unquoted shell word
   proxy/
-    stream.go
-    stream_test.go
-    stream_fuzz_test.go       FuzzStream
+    usage.go                  the three wire shapes into one Usage
+    stream.go                 SSE framing, and usage as the body is relayed
+    ledger.go                 price table, spend per session and day, the caps
+    usage_stream_test.go      the three shapes, an HTML 200, a quoted number, chunking
+    ledger_test.go            cached rates, an unknown model, both caps, the day, races
+    stream_fuzz_test.go       FuzzStream — chunking, and usage that is never negative
 cmd/verge/
   main.go                     wiring only: four clients, firefly, the loop, signals
   main_test.go                the refusals, the workspace prefix, no transport
@@ -344,7 +347,7 @@ Native `testing.F`, corpus committed under `testdata/fuzz/`, seeds replayed on e
 |---|---|
 | `FuzzRelay` | pi's stream is LF-framed with explicit warnings about Unicode separators, backpressure, and partial UTF-8. This is the boundary most likely to eat a real session. |
 | `FuzzCloudInit` | cloud-init facts render into YAML that runs as root at boot. A newline in a name is a machine nothing can find. This is a security test with a fuzzer attached. |
-| `FuzzStream` | SSE chunk boundaries, `\r` handling, a chunk after close, malformed usage. |
+| `FuzzStream` | An upstream's bytes, read as a copy while the client gets the originals: the same body must parse the same way however TCP splits it, usage must never be negative, and the parser must never refuse bytes. |
 | `FuzzPatch` | patches are generated from a hostile tree and applied on a fresh machine. Binary content, CRLF, path escape. |
 | `FuzzHetznerDecode` | truncated and mutated JSON from the provider. Cheap; it is nearly free once the harness exists. |
 | `FuzzValidID` | the session id is interpolated unquoted into a command that runs over ssh, so the id's validator is the only defence. Accepted ids must stay inside the command's alphabet, and the command must stay byte-for-byte the template. |
