@@ -150,6 +150,12 @@ func (f *Fetcher) Fetch(ctx context.Context, id firefly.MachineID, name string) 
 }
 
 // stream is the command's stdout, with the exit status checked when it ends.
+//
+// Read and Close may be called from different goroutines -- closing the reader is how
+// a caller interrupts a read that is waiting on a machine -- so the bookkeeping is
+// guarded. The pipe's own Read and Close are left outside the lock on purpose: holding
+// it across a read would make the close wait for the thing it is meant to interrupt,
+// and os.File already allows those two to race.
 type stream struct {
 	cmd    *exec.Cmd
 	out    io.ReadCloser
@@ -158,9 +164,11 @@ type stream struct {
 
 	once sync.Once
 
-	wait     error // the command's failure, if it had one
+	mu       sync.Mutex
+	wait     error // the command's failure, if it had one; visible after reap
 	ended    bool  // Read reached the end of the stream
 	reported bool  // Read already returned the failure, so Close stays quiet
+	closed   bool  // Close has run; a second one is a no-op
 }
 
 var _ io.ReadCloser = (*stream)(nil)
@@ -176,8 +184,14 @@ func (s *stream) Read(p []byte) (int, error) {
 	// EOF or a broken pipe: either way the command has finished or been killed, and
 	// its status decides whether this stream is a workspace at all. Reaping here is
 	// also what makes Wait's closing of the pipe the last thing that happens.
+	s.mu.Lock()
 	s.ended = true
+	s.mu.Unlock()
+
 	s.reap()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.wait != nil {
 		s.reported = true
 		return n, fmt.Errorf("ssh: %s: %w%s", s.dest, s.wait, s.stderrSuffix())
@@ -194,26 +208,45 @@ func (s *stream) Read(p []byte) (int, error) {
 // reads, so Close waits for it: the process is killed by the context if that is why
 // this is being called, and reaped either way.
 func (s *stream) Close() error {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil
+	}
+	s.closed = true
+	ended := s.ended
+	s.mu.Unlock()
+
 	// Once Wait has run, exec has already closed the pipe on this side, so closing
-	// it again is "file already closed" rather than a problem.
+	// it again is "file already closed" rather than a problem. Closing it while a
+	// read is blocked is the interruption, which is why this happens outside the lock.
 	var err error
-	if !s.ended {
+	if !ended {
 		err = s.out.Close()
 		if errors.Is(err, os.ErrClosed) {
 			err = nil
 		}
+		// Closing early means "I do not want the rest of this output", so the
+		// command is stopped rather than waited for: reaping alone would block the
+		// caller for as long as the machine keeps writing, and the machine is
+		// usually the thing that stopped answering.
+		if s.cmd.Process != nil {
+			_ = s.cmd.Process.Kill()
+		}
 	}
 	s.reap()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err != nil {
 		return err
 	}
-	if s.reported {
+	// An interrupted stream is not a failed one: the caller asked for this, so the
+	// kill that implemented it is not reported back as the machine's failure.
+	if s.reported || !ended || s.wait == nil {
 		return nil
 	}
-	if s.wait != nil {
-		return fmt.Errorf("ssh: %s: %w%s", s.dest, s.wait, s.stderrSuffix())
-	}
-	return nil
+	return fmt.Errorf("ssh: %s: %w%s", s.dest, s.wait, s.stderrSuffix())
 }
 
 // reap waits for the command once, and remembers why it failed.

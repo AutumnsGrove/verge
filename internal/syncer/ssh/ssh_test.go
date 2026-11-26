@@ -173,6 +173,41 @@ func TestFetch(t *testing.T) {
 		}
 	})
 
+	t.Run("happy/close_from_another_goroutine_interrupts_the_read", func(t *testing.T) {
+		// Closing the reader is how a caller gives up on a machine that is not
+		// answering, so Read and Close are allowed to be on different goroutines.
+		// Under -race this is the case that fails if the bookkeeping is unguarded.
+		f := fetcher(t, script(t, `sleep 30`))
+
+		rc, err := f.Fetch(context.Background(), "fake-001", "verge-machine-1")
+		if err != nil {
+			t.Fatalf("Fetch: %v", err)
+		}
+
+		done := make(chan error, 1)
+		go func() {
+			_, err := io.ReadAll(rc)
+			done <- err
+		}()
+
+		if err := rc.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		select {
+		case err := <-done:
+			if err == nil {
+				t.Fatal("the read finished cleanly after Close, want an interruption")
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("Close did not interrupt the blocked read")
+		}
+
+		// Idempotent: the caller that interrupts a read usually also defers Close.
+		if err := rc.Close(); err != nil {
+			t.Fatalf("second Close: %v", err)
+		}
+	})
+
 	t.Run("bad/a_name_that_cannot_be_a_host", func(t *testing.T) {
 		// The name is minted by firefly, so this is the second gate -- but it is
 		// also the string that becomes an ssh destination, and a name with a space
