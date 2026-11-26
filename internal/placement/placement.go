@@ -147,6 +147,19 @@ func New(cfg Config) (*Placement, error) {
 func (p *Placement) Capacity() int    { return p.capacity }
 func (p *Placement) MaxMachines() int { return p.maxMachines }
 
+// booting reports whether this machine is on its way up, so that waiting for it is the
+// right answer rather than provisioning another.
+//
+// Error with a Provisioning origin is included on purpose: a boot that failed is retried by
+// the loop rather than replaced, and a caller waiting for a machine should wait for that one
+// instead of paying for a second.
+func booting(m firefly.MachineStatus) bool {
+	if m.State == firefly.Provisioning {
+		return true
+	}
+	return m.State == firefly.Error && m.Origin == firefly.Provisioning
+}
+
 // Place puts a lease on a machine, or starts one, or says why it cannot.
 //
 // The three answers are deliberately different calls to action:
@@ -191,8 +204,21 @@ func (p *Placement) Place(ctx context.Context, req Request, now time.Time) (fire
 		return m.ID, true, nil
 	}
 
-	// Nothing fits. A machine may already be booting, and the caller waits for that rather
-	// than paying for another; the cap is what stops the waiting from becoming a bill.
+	// Nothing ready fits. If a machine is already booting, that is the answer: the caller
+	// retries and the retry is cheap, which is what "pending" promises.
+	//
+	// The first version of this went straight to provisioning, so a caller that retried
+	// during a boot bought a machine per attempt -- three retries, three machines, and the
+	// cap only stopped it at four. The test that catches it calls Place three times before
+	// any tick.
+	for _, m := range snap.Machines {
+		if booting(m) {
+			return m.ID, false, nil
+		}
+	}
+
+	// Nothing is booting and nothing fits, so this is either a new machine or a wait that
+	// lasts until a session ends. The cap is what stops the waiting from becoming a bill.
 	if len(snap.Machines) >= p.maxMachines {
 		return "", false, ErrAtCapacity
 	}

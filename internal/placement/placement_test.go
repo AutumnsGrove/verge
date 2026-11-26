@@ -193,6 +193,71 @@ func TestPlace(t *testing.T) {
 		}
 	})
 
+	t.Run("happy/retries_during_a_boot_are_cheap", func(t *testing.T) {
+		// "Pending, retry" is the contract, and a retry must not buy a machine: the first
+		// version of Place provisioned one per attempt, so three retries during a single boot
+		// were three machines.
+		w := newWorld(t)
+		req := placement.Request{Holder: "session:one", Kind: firefly.Session, TTL: time.Hour}
+
+		first, ok, err := w.p.Place(context.Background(), req, base)
+		if err != nil || ok || first == "" {
+			t.Fatalf("first Place = (%q, %v, %v), want a pending machine", first, ok, err)
+		}
+		for i := 0; i < 3; i++ {
+			got, ok, err := w.p.Place(context.Background(), req, base.Add(time.Duration(i+1)*time.Second))
+			if err != nil || ok {
+				t.Fatalf("retry %d = (%q, %v, %v), want the pending machine", i, got, ok, err)
+			}
+			if got != first {
+				t.Fatalf("retry %d returned %q, want the machine already booting (%q)", i, got, first)
+			}
+		}
+		if len(w.specs) != 1 {
+			t.Fatalf("asked for %d specs during one boot, want 1", len(w.specs))
+		}
+	})
+
+	t.Run("happy/a_boot_that_failed_is_still_the_machine_to_wait_for", func(t *testing.T) {
+		// A stalled boot goes to ERROR with a Provisioning origin, and the loop retries it.
+		// Provisioning a second machine because the first is unhappy is a bill, not a fix.
+		w := newWorld(t)
+		w.net.MetadataMissing() // a machine that runs and never joins
+
+		req := placement.Request{Holder: "session:one", Kind: firefly.Session, TTL: time.Hour}
+		first, _, err := w.p.Place(context.Background(), req, base)
+		if err != nil {
+			t.Fatalf("Place: %v", err)
+		}
+
+		// Past the boot deadline: Provisioning --Stalled--> ERROR.
+		for i := 1; i <= 12; i++ {
+			w.tick(t, base.Add(time.Duration(i)*time.Minute))
+		}
+		at := base.Add(12 * time.Minute)
+		snap, err := w.f.Snapshot(context.Background(), at)
+		if err != nil {
+			t.Fatalf("Snapshot: %v", err)
+		}
+		var state firefly.State
+		for _, m := range snap.Machines {
+			if m.ID == first {
+				state = m.State
+			}
+		}
+		if state != firefly.Error {
+			t.Fatalf("machine %s is %s, want ERROR so the case is about the failed boot", first, state)
+		}
+
+		got, ok, err := w.p.Place(context.Background(), req, at)
+		if err != nil || ok || got != first {
+			t.Fatalf("Place after a failed boot = (%q, %v, %v), want the same machine pending", got, ok, err)
+		}
+		if len(w.specs) != 1 {
+			t.Fatalf("asked for %d specs, want 1", len(w.specs))
+		}
+	})
+
 	t.Run("happy/reuses_a_ready_machine_with_room", func(t *testing.T) {
 		w := newWorld(t)
 		id := w.bootAndReady(t, base, "session:boot")
