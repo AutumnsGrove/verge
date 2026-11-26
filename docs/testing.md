@@ -103,7 +103,7 @@ are behind build tags and run in CI.
 |---|---|---|---|---|
 | static | `make vet` | nothing | seconds | vet, staticcheck, gofmt |
 | unit + integration | `go test ./...` | nothing | < 5 s | everything reachable without a cloud |
-| contract | `make contract` | a **separate** Hetzner project, R2, a tailnet key (`VERGE_TAILNET_NAME` if the token's default is not the one to ask) | seconds while read-only | the three clients, against the real APIs |
+| contract | `make contract` | a **separate** Hetzner project, a **separate** R2 bucket, a tailnet key (`VERGE_TAILNET_NAME` if the token's default is not the one to ask) | seconds while read-only | the three clients, against the real APIs |
 | full | `go test -tags e2e ./e2e` | the above plus a model provider | ~12 min | one real session, end to end, and a resume |
 
 The middle tier is the biggest slice of the suite, and it means **integration**, not unit: the real
@@ -418,7 +418,8 @@ still reads as "skipped" rather than "broken". They are deliberately read-only a
 against a label nothing uses, a `Describe` of an id no server can have, a node lookup for a name that
 is not in the tailnet, and a document round-trip under a per-run `contract-state-<nanos>.json`.
 The round trip writes and never deletes, so the contract bucket wants a lifecycle rule rather than a
-cleanup routine. Provisioning a real
+cleanup routine — and `VERGE_R2_BUCKET` must not be the production bucket, both for that rule and
+because the round trip writes documents nobody else should read. Provisioning a real
 machine, which is what the tier table promises it covers, belongs to the e2e tier: there it is the
 thing under test rather than a side effect of checking a decoder, and it is the only part that costs
 money. Nothing schedules them yet — the workflow row above is still "plan".

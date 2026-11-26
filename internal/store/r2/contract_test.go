@@ -72,10 +72,11 @@ func TestContractRoundTrip(t *testing.T) {
 
 	s := store(t)
 
-	// Every field the document has, with the Error record populated: a round trip
-	// that preserved only the name and the state would pass the assertions this
-	// replaces, and the fields it skipped are the ones a restart rebuilds its
-	// decisions from.
+	// Every field the document has -- a machine with its Error record populated, and
+	// a lease with its own instants -- because a round trip that preserved only the
+	// name and the state would pass the assertions this replaces, and the fields it
+	// skipped are the ones a restart rebuilds its decisions from. The lease is the
+	// half that keeps a machine alive across that restart.
 	base := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
 	doc := firefly.Document{
 		Version:           firefly.DocumentVersion,
@@ -94,6 +95,14 @@ func TestContractRoundTrip(t *testing.T) {
 			Attempt:      2,
 			LastErr:      "the save could not succeed",
 			RetryAt:      base.Add(95 * time.Minute),
+		}},
+		Leases: []firefly.Lease{{
+			ID:      firefly.LeaseID("lease-1"),
+			Machine: firefly.MachineID("hetzner:99999999999"),
+			Holder:  "session:01J8CONTRACT",
+			Kind:    firefly.Session,
+			Start:   base.Add(30 * time.Minute),
+			TTL:     45 * time.Minute,
 		}},
 	}
 	if err := s.Save(ctx, doc); err != nil {
@@ -119,6 +128,9 @@ func normalise(doc firefly.Document) firefly.Document {
 		m.Deadline = m.Deadline.UTC()
 		m.Since = m.Since.UTC()
 		m.RetryAt = m.RetryAt.UTC()
+	}
+	for i := range doc.Leases {
+		doc.Leases[i].Start = doc.Leases[i].Start.UTC()
 	}
 	return doc
 }
