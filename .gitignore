@@ -1,5 +1,7 @@
-# Binaries and build output
+# Binaries and build output (a plain `go build ./cmd/x` drops one in the root)
 /verge
+/verge-join
+/verge-save
 /bin/
 /dist/
 

@@ -56,6 +56,33 @@ jobs:
       # have concurrent readers, and retrofitting -race finds bugs late.
       - run: make race
 
+  # The cross-build the release publishes, built on every pull request. Without
+  # this job the Makefile's claim -- that a broken cross-build fails a PR rather
+  # than a release day -- is false, and the first thing to notice is a tag.
+  dist:
+    name: dist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # `make dist` names the version with `git describe --tags`.
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: make dist
+      # Both binaries are static, which is the property the image relies on. A
+      # dynamic binary would work here and fail on a minimal image, so it is
+      # checked rather than assumed.
+      - name: The binaries are static
+        run: |
+          for f in dist/*-linux-*/verge-join dist/*-linux-*/verge-save; do
+            echo "checking $f"
+            file "$f"
+            ! file "$f" | grep -q "dynamically linked"
+          done
+
   vuln:
     name: vuln
     runs-on: ubuntu-latest

@@ -69,6 +69,21 @@ Provisioning takes minutes, so the tiers are gated rather than run on every save
 tier always runs against a **separate cloud project** with its own credentials: the sweep
 primitive is destructive by design, and a test must never be able to see a production machine.
 
+## Releases and the image
+
+`make dist` cross-compiles three static linux binaries — `verge` (the control plane),
+`verge-join` and `verge-save` (the machine's half) — into `dist/` with checksums. Pushing a `v*`
+tag runs the same target in `.github/workflows/release.yml` and publishes the tarballs as a GitHub
+Release, so what an image installs is exactly what a developer can rebuild from the tag.
+
+The image owes two things, both named by the code that depends on them:
+
+- `/usr/local/bin/verge-join` — run once at boot by cloud-init, which renders the facts it reads
+  into `/etc/verge/join.json` (see `internal/cloudinit`). It joins the private network with
+  Tailscale SSH enabled, because that is how the control plane saves a workspace.
+- `/usr/local/bin/verge-save` — run by the control plane over ssh, writes the workspace to stdout
+  as a tar stream. A machine without it fails its save loudly and is kept rather than destroyed.
+
 ## The plan
 
 The detailed plan — decisions, the two-level lifecycle, capacity, the proxy contract, the network
