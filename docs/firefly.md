@@ -605,12 +605,19 @@ untracked files; a transcript bundle is deferred rather than refused, since the 
 that cannot be regenerated.
 
 Three things the specification left open, settled in the package's own doc rather than repeated here:
-the transport is a `Fetcher` interface because getting bytes off a machine about to be destroyed needs
-an agent that does not exist yet; the workspace is spooled to a file rather than buffered, because S3
-wants a length and a gigabyte must not live in memory; and an empty fetch is a successful no-op
-because that is what the contract says for a machine that never became ready. Everything else is an
-error, including a machine that cannot be reached — a machine with nothing on it and a machine we could
-not ask are the two cases whose confusion loses the work.
+the workspace is spooled to a file rather than buffered, because S3 wants a length and a gigabyte must
+not live in memory; an empty fetch is a successful no-op, because that is what the contract says for a
+machine that never became ready; and everything else is an error, including a machine that cannot be
+reached — a machine with nothing on it and a machine we could not ask are the two cases whose confusion
+loses the work.
+
+The transport is `internal/syncer/ssh`: it runs one command on the machine over Tailscale SSH. So the
+name travels with the save — `Syncer.Sync` takes it — because a tailnet cannot be asked about a
+provider id, and asking the provider to translate would put a save behind the system that may be the
+reason the machine is being destroyed. A non-zero exit is an error and the machine's stderr is carried
+into it: a partial tarball that reads to EOF is indistinguishable from a complete one to whoever
+restores it. The other half of the image's contract, next to `verge-join`, is
+`/usr/local/bin/verge-save`, which tars the workspace to stdout.
 
 `internal/store/r2` holds the other half, `Workspace`, which is a sink and not a store: it shares the
 bucket and the narrowed S3 client with the state document and shares no key scheme with it.
