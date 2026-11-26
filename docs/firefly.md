@@ -611,7 +611,7 @@ machine that never became ready; and everything else is an error, including a ma
 reached — a machine with nothing on it and a machine we could not ask are the two cases whose confusion
 loses the work.
 
-The transport is `internal/syncer/ssh`: it runs one command on the machine over Tailscale SSH. So the
+The transport is `internal/machine/ssh`: it runs one command on the machine over Tailscale SSH. So the
 name travels with the save — `Syncer.Sync` takes it — because a tailnet cannot be asked about a
 provider id, and asking the provider to translate would put a save behind the system that may be the
 reason the machine is being destroyed. A non-zero exit is an error and the machine's stderr is carried

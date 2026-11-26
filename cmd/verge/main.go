@@ -27,10 +27,10 @@ import (
 	"github.com/AutumnsGrove/verge/internal/config"
 	"github.com/AutumnsGrove/verge/internal/firefly"
 	"github.com/AutumnsGrove/verge/internal/loop"
+	"github.com/AutumnsGrove/verge/internal/machine/ssh"
 	"github.com/AutumnsGrove/verge/internal/net/tailnet"
 	"github.com/AutumnsGrove/verge/internal/store/r2"
 	"github.com/AutumnsGrove/verge/internal/syncer"
-	"github.com/AutumnsGrove/verge/internal/syncer/ssh"
 )
 
 // workspacePrefix is where this deployment's workspace tarballs live inside the

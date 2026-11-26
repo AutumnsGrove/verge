@@ -9,10 +9,11 @@ import (
 
 // configure makes the command the leader of its own process group.
 //
-// Without this, cancelling a save kills the command and leaves anything it started
-// holding the pipe open: the reader waits for output nobody is going to write, which is
-// exactly the hang the Fetcher contract says cannot happen. It is also why the ssh
-// process is not in our group -- killing the group means killing what it started.
+// Without this, cancelling a command kills it and leaves anything it started holding
+// the pipe open: the reader waits for output nobody is going to write, which is exactly
+// the hang the save contract says cannot happen -- and the hang a session would meet in
+// the tool pi was running when it was interrupted. It is also why the ssh process is not
+// in our group -- killing the group means killing what it started.
 func configure(cmd *exec.Cmd) {
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
