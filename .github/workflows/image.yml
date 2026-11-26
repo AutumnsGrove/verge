@@ -1,0 +1,97 @@
+# The machine image, baked in a runner and published as a workflow artifact.
+#
+# Deliberately not a release asset and deliberately not in the repository: an image is
+# hundreds of megabytes of somebody else's operating system, and this repository holds
+# source. The artifact is the build output, and it is enough for testing against a real
+# provider; a release pipeline can promote it later if that is ever wanted.
+#
+# It bakes exactly what the README says the image owes: the tailnet agent, verge-join and
+# verge-save. Nothing is fetched at boot, which is the property internal/cloudinit depends
+# on.
+#
+# No KVM on GitHub-hosted runners, so this does not boot anything: libguestfs edits the
+# vendor's cloud image offline, which is slower than a VM boot and does not need nested
+# virtualisation.
+name: image
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_image:
+        description: Ubuntu cloud image to build on
+        default: https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
+        type: string
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    name: image
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The same two binaries an installed host would have, built the same way.
+      - run: make dist
+
+      - name: Install the tooling that edits a disk image without booting it
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libguestfs-tools qemu-utils zstd
+
+      - name: Fetch the base image
+        run: |
+          set -euo pipefail
+          curl -fsSL -o base.img "${{ inputs.base_image || 'https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img' }}"
+          qemu-img info base.img | head -5
+
+      - name: Bake the image
+        run: |
+          set -euo pipefail
+          arch_dir="$(ls -d dist/verge-*-linux-amd64)"
+          mkdir -p overlay
+          cp -a "$arch_dir/verge-join" overlay/verge-join
+          cp -a "$arch_dir/verge-save" overlay/verge-save
+
+          # --network gives the appliance an interface so the agent can be installed from
+          # its own repository; nothing else in this build reaches the network at boot.
+          sudo virt-customize -a base.img --network \
+            --run-command 'curl -fsSL https://tailscale.com/install.sh | sh' \
+            --run-command 'command -v tailscaled && command -v tailscale' \
+            --run-command 'systemctl enable tailscaled' \
+            --run-command 'mkdir -p /etc/verge /workspace' \
+            --copy-in overlay/verge-join:/usr/local/bin \
+            --copy-in overlay/verge-save:/usr/local/bin \
+            --chmod 0755:/usr/local/bin/verge-join \
+            --chmod 0755:/usr/local/bin/verge-save \
+            --run-command 'test -x /usr/local/bin/verge-save' \
+            --run-command 'ls -l /usr/local/bin/verge-join /usr/local/bin/verge-save'
+
+      - name: Shrink and compress
+        run: |
+          set -euo pipefail
+          qemu-img convert -O qcow2 -c base.img image.qcow2
+          zstd -T0 -19 -o verge-image.qcow2.zst image.qcow2
+          ls -lh base.img image.qcow2 verge-image.qcow2.zst
+          sha256sum verge-image.qcow2.zst > verge-image.qcow2.zst.sha256
+
+      # The artifact is the image. It is not a release asset and never enters the tree.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verge-image-${{ github.ref_name }}
+          path: |
+            verge-image.qcow2.zst
+            verge-image.qcow2.zst.sha256
+          retention-days: 14
+          compression-level: 0
