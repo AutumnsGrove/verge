@@ -3,6 +3,7 @@ package placement_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,6 +24,10 @@ type world struct {
 	p     *placement.Placement
 
 	specs []string // names NewSpec was asked for, in order
+
+	// beforeSpec runs between the name hint and the provision, which is where another
+	// caller could provision and move the counter.
+	beforeSpec func()
 }
 
 func newWorld(t *testing.T, opts ...func(*placement.Config)) *world {
@@ -58,6 +63,9 @@ func newWorld(t *testing.T, opts ...func(*placement.Config)) *world {
 		Firefly: f,
 		NewSpec: func(name string) (firefly.Spec, error) {
 			w.specs = append(w.specs, name)
+			if w.beforeSpec != nil {
+				w.beforeSpec()
+			}
 			return firefly.Spec{
 				CloudInit: []byte("#cloud-config\n# hostname: " + name + "\n"),
 				Image:     "ubuntu-24.04",
@@ -170,6 +178,19 @@ func TestPlace(t *testing.T) {
 		if w.specs[0] != name {
 			t.Fatalf("the spec was built for %q and the provider was told %q", w.specs[0], name)
 		}
+
+		// The rendered script has to carry the same name: the network is asked about the
+		// hostname the machine set at boot, so a script built for another name produces a
+		// machine nothing can find.
+		var spec firefly.Spec
+		for _, s := range w.cloud.Specs() {
+			if s.Name == name {
+				spec = s
+			}
+		}
+		if !strings.Contains(string(spec.CloudInit), name) {
+			t.Fatalf("the boot script does not carry %q:\n%s", name, spec.CloudInit)
+		}
 	})
 
 	t.Run("happy/reuses_a_ready_machine_with_room", func(t *testing.T) {
@@ -245,6 +266,27 @@ func TestPlace(t *testing.T) {
 		}, now)
 		if !errors.Is(err, placement.ErrAtCapacity) {
 			t.Fatalf("Place = %v, want %v: the machine is past its deadline", err, placement.ErrAtCapacity)
+		}
+	})
+
+	t.Run("sad/the_document_moves_between_the_hint_and_the_provision", func(t *testing.T) {
+		// The hint is a read and another caller can act after it: if the document moved, the
+		// name this placement was told is not the name the counter would mint. Setting the
+		// name on the spec turns that into ErrNameTaken -- the caller retries and gets the
+		// right name -- instead of a machine whose boot script carries a name the network
+		// will never be asked about.
+		w := newWorld(t)
+		w.beforeSpec = func() {
+			if _, err := w.f.Provision(context.Background(), firefly.Spec{CloudInit: []byte("#cloud-config\n# other\n")}, base); err != nil {
+				t.Fatalf("the other caller's Provision: %v", err)
+			}
+		}
+
+		_, _, err := w.p.Place(context.Background(), placement.Request{
+			Holder: "session:racing", Kind: firefly.Session, TTL: time.Hour,
+		}, base)
+		if !errors.Is(err, firefly.ErrNameTaken) {
+			t.Fatalf("Place = %v, want %v: the hint went stale", err, firefly.ErrNameTaken)
 		}
 	})
 

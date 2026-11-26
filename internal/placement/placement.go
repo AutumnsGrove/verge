@@ -22,6 +22,20 @@
 // What this package does not do: it does not render cloud-init, mint enrolment keys, or
 // know what an image is. It asks for a Spec by name -- the name firefly will use -- and
 // the composition of key and renderer happens where the credentials are.
+//
+// # One caller at a time
+//
+// Place reads a snapshot, decides, then acts, and those are not atomic: two concurrent
+// calls can both see a machine with one seat left and both take it, putting Capacity+1
+// sessions on it. firefly cannot prevent that, because Acquire is told a machine and does
+// not know how many seats it has -- capacity is placement's policy, not firefly's
+// mechanism.
+//
+// So Place must be called from one goroutine, which is what the daemon does: the loop is
+// single-threaded and the caller that needs machines is its caller. A program that wants
+// to place from several must serialise here rather than in firefly, and if that ever
+// happens the right fix is a mutex in this package, not a second capacity check in the
+// mechanism.
 package placement
 
 import (
@@ -127,6 +141,9 @@ func New(cfg Config) (*Placement, error) {
 }
 
 // Capacity and MaxMachines report the effective policy, for a caller that reports it.
+// Capacity and MaxMachines report the effective policy, for a caller that reports it.
+//
+// Place is not safe for concurrent use; see the package doc.
 func (p *Placement) Capacity() int    { return p.capacity }
 func (p *Placement) MaxMachines() int { return p.maxMachines }
 

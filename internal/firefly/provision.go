@@ -39,7 +39,12 @@ func (f *Firefly) MintName(ctx context.Context) (string, error) {
 	if err := f.load(ctx); err != nil {
 		return "", err
 	}
-	return f.mintName(&f.doc), nil
+	// Minted on a copy: mintName advances the counter on the document it is given, and a
+	// read that advanced the live one would make two asks disagree while recording nothing
+	// that was saved -- a drift between the document in memory and the one on disk. The
+	// test for this is the one that found it.
+	next := f.doc.Clone()
+	return f.mintName(&next), nil
 }
 
 // Provision creates a machine and records it as PROVISIONING.
