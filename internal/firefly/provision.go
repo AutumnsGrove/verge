@@ -25,6 +25,23 @@ var ErrProvisioningBackoff = errors.New("firefly: provisioning is backing off af
 // create that succeeded would have to be deleted again to stay consistent.
 var ErrNameTaken = errors.New("firefly: a machine with that name already exists")
 
+// MintName reports the name the next Provision would take, without recording anything.
+//
+// It exists because the boot script has to carry the name and Provision mints it: the
+// caller that renders cloud-init needs the name before the machine exists. This is a
+// read, and a hint rather than a reservation -- two callers that ask before either
+// provisions get the same answer, and the second Provision fails with ErrNameTaken
+// rather than creating a machine with a name that is already on the network.
+func (f *Firefly) MintName(ctx context.Context) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if err := f.load(ctx); err != nil {
+		return "", err
+	}
+	return f.mintName(&f.doc), nil
+}
+
 // Provision creates a machine and records it as PROVISIONING.
 //
 // It is the ABSENT --Need--> PROVISIONING row. Placement has already happened:
