@@ -52,6 +52,9 @@ internal/
   config/
     config.go                 flags and environment into one validated Config
     config_test.go            defaults, rejections, and that a Secret never prints
+  loop/
+    loop.go                   the daemon's loop: immediate pass, interval, graceful stop
+    loop_test.go              the injected wait, a failed pass, a pass in flight
   cloudinit/
     render.go                 the boot script: name, mesh address, enrolment key
     render_test.go            the document as a whole, and hostile values
@@ -79,6 +82,9 @@ internal/
     stream.go
     stream_test.go
     stream_fuzz_test.go       FuzzStream
+cmd/verge/
+  main.go                     wiring only: four clients, firefly, the loop, signals
+  main_test.go                the refusals, the workspace prefix, no transport
 e2e/
   contract_test.go            //go:build e2e
   full_test.go                //go:build e2e

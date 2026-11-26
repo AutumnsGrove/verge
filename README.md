@@ -21,10 +21,14 @@ loop, `Provision`, machine naming, and all three boundary interfaces — provide
 and state sync — each with a fake. The Hetzner client is written but has never been pointed at the
 real API: the unit tier runs it against `httptest`, and the contract tier that would use a real token
 does not exist yet. The tailnet client and the R2 state store exist and are tested against `httptest`,
-and neither has been pointed at real infrastructure. The cloud-init renderer exists and is fuzzed, but
-nothing mints the enrolment key it expects. Nothing yet reconciles on a timer: there is no `main`.
-`docs/testing.md` names the files the rest will become, and `docs/firefly.md` is the design they
-implement.
+and neither has been pointed at real infrastructure. The cloud-init renderer exists and is fuzzed, and the enrolment-key minter it
+feeds exists, but nothing composes the two yet. `internal/syncer` saves a machine's workspace as one
+tarball in R2; the machine-side half — an agent that streams it over the tailnet — is not written, so
+a save currently fails loudly instead of quietly destroying the machine it could not save.
+`cmd/verge` reconciles on a timer: it builds the clients, calls `Tick` on every interval, and finishes
+the pass in flight when it is interrupted. It does not provision anything yet — placement, the caller
+that decides when work needs a machine, is still to come. `docs/testing.md` names the files the rest
+will become, and `docs/firefly.md` is the design they implement.
 
 This repository is a fresh start in Go, on a different architecture from the version whose history
 precedes this commit. The earlier TypeScript/Cloudflare Code implementation is kept in
