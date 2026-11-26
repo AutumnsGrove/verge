@@ -35,9 +35,14 @@ func client(t *testing.T) *tailnet.Client {
 	return tailnet.New(tok, tailnet.WithTailnet(name))
 }
 
-// TestContractNodeDoesNotExist is the two facts this client exists to report, from
+// TestContractNodeDoesNotExist is the absent half of what this client reports, from
 // the real API rather than from httptest: a name that is not in the tailnet is not a
 // node, and is therefore not joined.
+//
+// It proves the request, the auth, and the not-found path. It does not prove the
+// device decoder -- a client reading the wrong field would also find no device -- and
+// that needs a device the test can be sure exists, which means one this test created
+// or one the maintainer pins by name. Both are decisions rather than tests.
 func TestContractNodeDoesNotExist(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()

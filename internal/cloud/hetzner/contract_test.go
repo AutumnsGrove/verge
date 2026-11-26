@@ -37,9 +37,18 @@ func client(t *testing.T) *hetzner.Client {
 	return hetzner.New(token(t))
 }
 
-// TestContractListAgainstTheRealAPI is the decode path, end to end: a real listing
-// of a project that matches nothing, which still proves the request, the auth, the
-// pagination loop and the JSON shape.
+// TestContractListAgainstTheRealAPI proves the request the real API receives: the
+// endpoint, the query shape, the token, the status mapping, and that the response is
+// well-formed enough to decode into an empty list.
+//
+// It does not prove the field-level decoding of a populated listing, and the comment
+// here claimed it did: a decoder reading the wrong JSON key would still return zero
+// machines and this would still pass. The project holds nothing on purpose -- a
+// contract test that needs a machine it did not provision cannot run on a quiet
+// afternoon -- and the client calls no endpoint that returns a populated shape for
+// free (Hetzner's locations and server types would, but Describe-style decoding of
+// servers is what matters here). Covering that honestly needs a fixture machine the
+// maintainer owns, which is a decision rather than a test.
 func TestContractListAgainstTheRealAPI(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
