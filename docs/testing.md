@@ -90,8 +90,9 @@ internal/
   session/
     session.go                place, run, relay, renew, release: one pi session's
                               control-plane half
-    session_test.go           pending, both directions, renewal, a lapse, a failed
-                              start, an orderly close, a cancelled caller
+    session_test.go           pending, both directions, the renewal write rate, a
+                              lapse, a failed start, an orderly close, a cancelled caller
+    fuzz_test.go              FuzzValidID — the id becomes an unquoted shell word
   proxy/
     stream.go
     stream_test.go
@@ -346,6 +347,7 @@ Native `testing.F`, corpus committed under `testdata/fuzz/`, seeds replayed on e
 | `FuzzStream` | SSE chunk boundaries, `\r` handling, a chunk after close, malformed usage. |
 | `FuzzPatch` | patches are generated from a hostile tree and applied on a fresh machine. Binary content, CRLF, path escape. |
 | `FuzzHetznerDecode` | truncated and mutated JSON from the provider. Cheap; it is nearly free once the harness exists. |
+| `FuzzValidID` | the session id is interpolated unquoted into a command that runs over ssh, so the id's validator is the only defence. Accepted ids must stay inside the command's alphabet, and the command must stay byte-for-byte the template. |
 
 **Budget.** Seeds on PR (~2 s). Ten minutes per target nightly. One 24-hour soak before the first
 release tag. A failing input is minimised, committed as a seed, and fixed — never skipped.

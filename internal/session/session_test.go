@@ -31,7 +31,7 @@ type world struct {
 	t     *testing.T
 	cloud *fake.Cloud
 	net   *fake.Network
-	store *firefly.MemStore
+	store *countingStore
 	f     *firefly.Firefly
 	p     *placement.Placement
 	run   *runner
@@ -48,7 +48,7 @@ func newWorld(t *testing.T, opts ...func(*session.Config)) *world {
 	w := &world{
 		t:     t,
 		cloud: fake.New(base).Boot(30 * time.Second),
-		store: firefly.NewMemStore(),
+		store: &countingStore{MemStore: firefly.NewMemStore()},
 		now:   base,
 	}
 	w.net = fake.NewNetwork(w.cloud)
@@ -192,6 +192,45 @@ func (w *world) drain() {
 	w.t.Fatalf("%d machines still exist with nothing holding them, want 0", len(w.snapshot().Machines))
 }
 
+// countingStore counts every attempt to write the document, so a rule about *how often* a
+// write happens is a fact rather than an inference from the lease's liveness. It can also
+// fail one write, which is what a store having a bad minute looks like.
+//
+// The lease lifecycle is firefly's and its own tests cover it; what is tested through this
+// is the session's policy -- renew at most once per half TTL, retry on the next activity
+// after a failure, and never on every record.
+type countingStore struct {
+	*firefly.MemStore
+
+	mu       sync.Mutex
+	attempts int
+	failNext bool
+}
+
+func (s *countingStore) Save(ctx context.Context, doc firefly.Document) error {
+	s.mu.Lock()
+	s.attempts++
+	fail := s.failNext
+	s.failNext = false
+	s.mu.Unlock()
+	if fail {
+		return errors.New("the store is unreachable")
+	}
+	return s.MemStore.Save(ctx, doc)
+}
+
+func (s *countingStore) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.attempts
+}
+
+func (s *countingStore) failOnce() {
+	s.mu.Lock()
+	s.failNext = true
+	s.mu.Unlock()
+}
+
 func TestOpen(t *testing.T) {
 	t.Run("happy/a_session_runs_on_the_machine_it_waited_for", func(t *testing.T) {
 		w := newWorld(t)
@@ -331,6 +370,28 @@ func TestOpen(t *testing.T) {
 		}
 	})
 
+	t.Run("sad/a_cancelled_start_still_hands_the_machine_back", func(t *testing.T) {
+		// A caller that gave up and a transport that failed arrive together: the context is
+		// dead by the time the start fails. The release must survive that, or the lease the
+		// failed start took keeps a machine alive for a session nobody can reach.
+		w := newWorld(t)
+		req := session.Request{ID: "s-one"}
+		if _, err := w.m.Open(context.Background(), req, w.now); !errors.Is(err, session.ErrPending) {
+			t.Fatalf("Open before the boot = %v, want %v", err, session.ErrPending)
+		}
+		w.ready()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		w.run.cancel = cancel
+		w.run.err = errors.New("ssh: the machine never answered")
+		if _, err := w.m.Open(ctx, req, w.now); err == nil {
+			t.Fatal("Open with a cancelled context = nil error, want a failure")
+		}
+		if got := w.live(); got != 0 {
+			t.Fatalf("%d leases live after a cancelled start, want 0", got)
+		}
+	})
+
 	t.Run("bad/an_id_that_cannot_be_a_session", func(t *testing.T) {
 		// The id is a holder name, a directory under the workspace, and pi's session id.
 		// It is validated once here rather than quoted in three places, and the ones that
@@ -427,6 +488,74 @@ func TestRenew(t *testing.T) {
 		w.now = base.Add(15 * time.Minute)
 		if got := w.live(); got != 1 {
 			t.Fatalf("%d leases live at %s, want the renewed lease", got, w.now.Sub(base))
+		}
+	})
+
+	t.Run("happy/records_inside_the_half_ttl_do_not_renew", func(t *testing.T) {
+		// The throttle is a write rate, not a behaviour, so the number of store writes is
+		// the assertion. Without it, a busy session writes the document once per record.
+		w := newWorld(t)
+		sess := w.open("s-one")
+
+		before := w.store.count()
+		for i := 0; i < 3; i++ {
+			w.run.last().say(`{"type":"message_update"}`)
+			if _, err := sess.Next(context.Background()); err != nil {
+				t.Fatalf("Next: %v", err)
+			}
+		}
+		if got := w.store.count() - before; got != 0 {
+			t.Fatalf("%d lease writes for three records inside the half TTL, want 0", got)
+		}
+
+		// Past the half TTL the first record renews, and the two that follow it are inside
+		// the new window.
+		w.now = base.Add(45 * time.Minute)
+		for i := 0; i < 3; i++ {
+			w.run.last().say(`{"type":"message_update"}`)
+			if _, err := sess.Next(context.Background()); err != nil {
+				t.Fatalf("Next past the half TTL: %v", err)
+			}
+		}
+		if got := w.store.count() - before; got != 1 {
+			t.Fatalf("%d lease writes for three records past the half TTL, want exactly 1", got)
+		}
+	})
+
+	t.Run("sad/a_failed_renewal_is_retried_on_the_next_record", func(t *testing.T) {
+		// A store that has a bad minute must not cost the session: the failed attempt does
+		// not move the window, so the next record tries again while the old lease is still
+		// live. Advancing the window on failure would put the retry at the lease's expiry,
+		// where a successful retry is no longer possible.
+		w := newWorld(t, func(c *session.Config) { c.TTL = 4 * time.Hour })
+		sess := w.open("s-one")
+
+		// Past the half TTL, and the store refuses the first write.
+		w.now = base.Add(3 * time.Hour)
+		w.store.failOnce()
+		before := w.store.count()
+
+		w.run.last().say(`{"type":"message_update"}`)
+		if _, err := sess.Next(context.Background()); err != nil {
+			t.Fatalf("Next: %v", err)
+		}
+		if got := w.store.count() - before; got != 1 {
+			t.Fatalf("%d lease writes for the failed renewal, want 1", got)
+		}
+
+		// The very next record retries, and this time it works: the lease is live past
+		// where the original one would have expired.
+		w.run.last().say(`{"type":"message_update"}`)
+		if _, err := sess.Next(context.Background()); err != nil {
+			t.Fatalf("Next after a failed renewal: %v", err)
+		}
+		if got := w.store.count() - before; got != 2 {
+			t.Fatalf("%d lease writes after the retry, want 2", got)
+		}
+
+		w.now = base.Add(6 * time.Hour)
+		if got := w.live(); got != 1 {
+			t.Fatalf("%d leases live at %s, want the retried lease", got, w.now.Sub(base))
 		}
 	})
 
@@ -591,7 +720,11 @@ func TestNew(t *testing.T) {
 // runner is the machine transport at its seam: it records what it was asked to run and
 // hands back a process. The real one is internal/machine/ssh, exercised by its own tests.
 type runner struct {
+	// err fails the start. cancel, when set, is called first: a caller that gave up and a
+	// transport that failed are the same instant from the session's side, and that is the
+	// case the release rule exists for.
 	err      error
+	cancel   context.CancelFunc
 	procs    []*proc
 	ids      []firefly.MachineID
 	names    []string
@@ -603,6 +736,9 @@ func (r *runner) Run(_ context.Context, id firefly.MachineID, name, command stri
 	r.names = append(r.names, name)
 	r.commands = append(r.commands, command)
 	if r.err != nil {
+		if r.cancel != nil {
+			r.cancel()
+		}
 		return nil, r.err
 	}
 	p := newProc()

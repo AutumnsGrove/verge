@@ -412,8 +412,14 @@ func (s *Session) Close(ctx context.Context) error {
 // renew extends the lease if half of it has passed since the last renewal.
 //
 // A lapse is terminal: firefly is about to drain the machine, and a session on it is a
-// session about to lose its work. Any other failure is logged and retried on the next
-// activity, because the lease already recorded is still counted until it expires.
+// session about to lose its work.
+//
+// Any other failure leaves the window where it was, so the next record tries again. The
+// first version advanced it before the attempt on the reasoning that a failing store should
+// not be written to once per record -- but that puts the retry at exactly the lease's own
+// expiry, which is the one moment a retry cannot help: a store that came back one second
+// after the failure would still find the session gone. One write per record while a store
+// is down is the cheaper mistake.
 func (s *Session) renew(ctx context.Context) error {
 	now := s.now()
 
@@ -422,13 +428,13 @@ func (s *Session) renew(ctx context.Context) error {
 		s.mu.Unlock()
 		return nil
 	}
-	// Set before the attempt, so a failure is retried after another half TTL rather than
-	// on every record.
-	s.renewAt = now.Add(s.ttl / 2)
 	s.mu.Unlock()
 
 	err := s.f.Renew(ctx, s.lease, s.ttl, now)
 	if err == nil {
+		s.mu.Lock()
+		s.renewAt = now.Add(s.ttl / 2)
+		s.mu.Unlock()
 		return nil
 	}
 	if errors.Is(err, firefly.ErrLeaseExpired) {

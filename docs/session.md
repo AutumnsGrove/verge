@@ -51,7 +51,9 @@ because a later document would otherwise invent a different answer.
    design that injects the single one it has, and "the agent is thinking" is exactly the activity the
    previous design could not detect. The cost is stated rather than hidden — a session that says
    nothing for a whole TTL loses its machine to the drain window, and the next record reports the
-   lapse.
+   lapse. A renewal that fails *without* a lapse leaves the window where it was, so the next record
+   tries again: moving it on failure would put the retry at the lease's own expiry, the one moment a
+   retry cannot help.
 
 2. **The lease is released on a context that cannot be cancelled.** The usual reason a stream ended is
    that the caller gave up, which cancels the session's context; a release that inherited it would fail
@@ -109,6 +111,10 @@ The suite is an integration test against the real placement, the real firefly, a
 cloud and fake clock. Only the machine's process is a double — the far side is a network and a
 computer, which is the one seam `docs/testing.md` allows a double at. The fake's pipes are real, so a
 read the session makes blocks and is interrupted as it would be against ssh.
+
+The lease's write rate is asserted by counting store writes, not by watching liveness: three records
+inside the half TTL write nothing, three past it write once, and a failed renewal is retried by the
+very next record while the old lease is still live.
 
 What those tests prove: pending starts no process and buys no second machine; the command is the
 image's contract and names the session's own directory; records cross both ways; the lease is renewed
