@@ -370,7 +370,7 @@ func (nopNetwork) Forget(context.Context, string) error             { return nil
 
 type nopSyncer struct{}
 
-func (nopSyncer) Sync(context.Context, firefly.MachineID) error { return nil }
+func (nopSyncer) Sync(context.Context, firefly.MachineID, string) error { return nil }
 
 // TestSaveRefusesAnInvalidDocument.
 //

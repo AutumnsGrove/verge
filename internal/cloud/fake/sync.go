@@ -24,6 +24,7 @@ type Syncer struct {
 
 	calls  int
 	synced []firefly.MachineID
+	stored []Saved
 }
 
 // NewSyncer returns a syncer that always succeeds.
@@ -47,8 +48,16 @@ func (s *Syncer) FailAlways() *Syncer {
 	return s
 }
 
+// Saved is one successful save, so a test can assert the name the transport would
+// have been given -- the tailnet is keyed on it, and a save against the wrong host is
+// the failure this records.
+type Saved struct {
+	ID   firefly.MachineID
+	Name string
+}
+
 // Sync saves, or refuses.
-func (s *Syncer) Sync(ctx context.Context, id firefly.MachineID) error {
+func (s *Syncer) Sync(ctx context.Context, id firefly.MachineID, name string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -65,6 +74,7 @@ func (s *Syncer) Sync(ctx context.Context, id firefly.MachineID) error {
 		return ErrSyncFailed
 	}
 	s.synced = append(s.synced, id)
+	s.stored = append(s.stored, Saved{ID: id, Name: name})
 	return nil
 }
 
@@ -73,6 +83,15 @@ func (s *Syncer) Calls() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.calls
+}
+
+// Saved reports what each successful save was told, in order.
+func (s *Syncer) Saved() []Saved {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]Saved, len(s.stored))
+	copy(out, s.stored)
+	return out
 }
 
 // Synced reports the machines that were saved successfully, in order.

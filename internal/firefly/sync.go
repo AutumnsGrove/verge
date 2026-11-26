@@ -20,5 +20,11 @@ type Syncer interface {
 	//
 	// The implementation decides what "saved" means; firefly decides when it must
 	// have happened.
-	Sync(ctx context.Context, id MachineID) error
+	//
+	// The name is passed because a transport needs it and nothing else has it: the
+	// tailnet is keyed on the machine's name rather than the provider's id, so a
+	// fetcher handed only the id would have to ask the provider -- the one system
+	// that may be the reason the save is needed -- to translate. firefly minted the
+	// name and stored it, so it says it.
+	Sync(ctx context.Context, id MachineID, name string) error
 }

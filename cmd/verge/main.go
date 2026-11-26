@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -29,13 +30,35 @@ import (
 	"github.com/AutumnsGrove/verge/internal/net/tailnet"
 	"github.com/AutumnsGrove/verge/internal/store/r2"
 	"github.com/AutumnsGrove/verge/internal/syncer"
+	"github.com/AutumnsGrove/verge/internal/syncer/ssh"
 )
 
 // workspacePrefix is where this deployment's workspace tarballs live inside the
 // state bucket. It is derived from the label rather than configured, so two
 // deployments that already cannot see each other's machines also cannot overwrite
 // each other's workspaces.
-func workspacePrefix(label string) string { return "workspaces/" + label }
+//
+// The label is "key=value", which is not an object-key element, so its punctuation is
+// mapped to a dash rather than passed through: the store validates keys, and a prefix
+// that made every save fail with a configuration error would be a bad way to find out
+// that "=" is not allowed. Two labels that sanitise to the same element share a prefix,
+// which is why the sanitising is documented here rather than guessed at.
+func workspacePrefix(label string) string {
+	var b strings.Builder
+	b.WriteString("workspaces/")
+	for _, r := range label {
+		switch {
+		case r >= 'a' && r <= 'z',
+			r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9',
+			r == '-', r == '_', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+	}
+	return b.String()
+}
 
 func main() {
 	if err := run(os.Args[1:], os.Getenv, os.Stderr); err != nil {
@@ -70,12 +93,10 @@ func run(args []string, getenv func(string) string, stderr io.Writer) error {
 		return err
 	}
 
-	// The binary can reconcile but not yet save: the machine-side agent that
-	// streams a workspace over the tailnet does not exist. Say so once, loudly,
-	// rather than discovering it as an abandoned workspace at the cap -- which is
-	// what the fetcher below would produce, and why it is an error rather than an
-	// empty stream that would look like "nothing to save".
-	log.Warn("workspace saves will fail: the machine-side transport is not implemented; machines will not be destroyed by this binary until it is")
+	// Where a save goes, said once at startup because it is the one thing an
+	// operator has to check against the image: the machine must provide this
+	// command, or every save fails with "command not found".
+	log.Info("workspace saves run over ssh as " + ssh.DefaultUser + "@<machine> " + ssh.DefaultCommand)
 
 	l, err := loop.New(loop.Config{Tick: f.Tick, Interval: cfg.Interval, Log: log})
 	if err != nil {
@@ -125,8 +146,18 @@ func build(cfg *config.Config) (*firefly.Firefly, error) {
 		return nil, err
 	}
 
+	// Tailscale SSH is the transport: it needs no listener on the machine and no
+	// second credential, because the tailnet already decides who may connect. The
+	// host-key policy is the deployment's, so no arguments are added here -- a
+	// control plane with a known_hosts file and one without want different flags,
+	// and neither belongs in this file's opinion.
+	transport, err := ssh.New(ssh.Config{Binary: "ssh"})
+	if err != nil {
+		return nil, err
+	}
+
 	saves, err := syncer.New(syncer.Config{
-		Fetcher: noTransport{},
+		Fetcher: transport,
 		Sink:    workspaces,
 		Prefix:  workspacePrefix(cfg.Label),
 	})
@@ -148,23 +179,4 @@ func build(cfg *config.Config) (*firefly.Firefly, error) {
 		RetryBase:         cfg.RetryBase,
 		RetryMax:          cfg.RetryMax,
 	})
-}
-
-// noTransport is the fetcher that has no machine to fetch from.
-//
-// It returns an error rather than an empty stream, and the distinction is the whole
-// point of the syncer: an empty stream means the machine had nothing to save, and
-// firefly would treat that as a successful save and destroy the machine. An error
-// means "we could not ask", which is the case in which the workspace -- and the
-// person's afternoon -- is kept.
-type noTransport struct{}
-
-// ErrNoTransport means the workspace transport does not exist yet.
-var ErrNoTransport = errors.New("verge: the machine-side workspace transport is not implemented")
-
-func (noTransport) Fetch(ctx context.Context, id firefly.MachineID) (io.ReadCloser, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	return nil, fmt.Errorf("%w: cannot fetch the workspace of %s", ErrNoTransport, id)
 }
