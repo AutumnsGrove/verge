@@ -25,12 +25,15 @@ type recorder struct {
 
 	ticks   []time.Time
 	waits   []time.Duration
-	done    chan struct{}  // closed when the loop returns
-	release chan struct{}  // a tick that blocks waits on this
-	fail    error          // returned by the first tick when set
-	block   bool           // the first tick blocks until release is closed
-	waitFor chan time.Time // the test signals "the interval elapsed"
-	ticked  chan struct{}  // each pass announces itself, so no test polls
+	done    chan struct{} // closed when the loop returns
+	release chan struct{} // a tick that blocks waits on this
+	fail    error         // returned by the first tick when set
+	block   bool          // the first tick blocks until release is closed
+	// cancelledPass is set when a pass in flight finds its context cancelled, which
+	// is the failure the graceful-shutdown promise forbids.
+	cancelledPass error
+	waitFor       chan time.Time // the test signals "the interval elapsed"
+	ticked        chan struct{}  // each pass announces itself, so no test polls
 
 	log *bytes.Buffer
 }
@@ -63,6 +66,15 @@ func (r *recorder) loop(t *testing.T, interval time.Duration) *loop.Loop {
 
 			if block {
 				<-r.release
+				// The pass in flight must be finishable: a cancelled context here is
+				// the bug this case exists to catch, and it is a bug about the context
+				// the loop hands the pass rather than about blocking.
+				if err := ctx.Err(); err != nil {
+					r.mu.Lock()
+					r.cancelledPass = err
+					r.mu.Unlock()
+					return firefly.Result{}, err
+				}
 			}
 			if failure != nil {
 				return firefly.Result{}, failure
@@ -216,8 +228,8 @@ func TestRun(t *testing.T) {
 
 	t.Run("happy/a_pass_in_flight_finishes", func(t *testing.T) {
 		// Cancellation stops the loop starting another pass; it does not abandon the
-		// one already walking a machine's row. That is the whole reason a tick takes
-		// a context and is not itself cancelled.
+		// one already walking a machine's row. The pass itself checks its own context
+		// once it unblocks, so this case fails if Run hands Tick the cancellable one.
 		r := newRecorder()
 		r.block = true
 		stop := r.run(t, r.loop(t, time.Minute))
@@ -238,6 +250,26 @@ func TestRun(t *testing.T) {
 		}
 		if got := r.count(); got != 1 {
 			t.Fatalf("%d ticks, want 1: a pass started after cancellation", got)
+		}
+		if r.cancelledPass != nil {
+			t.Fatalf("the pass in flight was cancelled under it: %v", r.cancelledPass)
+		}
+	})
+
+	t.Run("happy/already_cancelled_starts_nothing", func(t *testing.T) {
+		// A signal that lands between NotifyContext and Run must not buy a full
+		// reconcile first: the process was asked to stop before it started.
+		r := newRecorder()
+		l := r.loop(t, time.Minute)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		if err := l.Run(ctx); err != nil {
+			t.Fatalf("Run = %v, want nil", err)
+		}
+		if got := r.count(); got != 0 {
+			t.Fatalf("%d ticks before the loop noticed cancellation, want 0", got)
 		}
 	})
 

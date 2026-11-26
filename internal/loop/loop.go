@@ -100,12 +100,25 @@ func New(cfg Config) (*Loop, error) {
 // the middle of one: a tick that is cancelled half way through is the state the
 // whole design refuses to leave behind.
 func (l *Loop) Run(ctx context.Context) error {
+	// The pass gets a context that cannot be cancelled, and that is the whole of
+	// the graceful-shutdown promise. ctx.Done is the signal to stop *starting*
+	// work; handing it to a pass would instead fire every ctx.Err guard inside the
+	// stores and clients, aborting a tick between a machine's save and its delete
+	// -- the half-applied state firefly's ordering guarantee exists to prevent.
+	//
+	// A pass that hangs is therefore not bounded from here. It is bounded from
+	// outside: every client has its own timeout, and the process has its own
+	// deadline.
+	passCtx := context.WithoutCancel(ctx)
+
 	for {
-		// The pass is not passed a cancelled context: ctx cancellation is the
-		// signal to stop starting work, and stopping is graceful precisely because
-		// this pass is allowed to finish. Shutdown therefore comes from the
-		// process's own deadline, not from this loop.
-		l.pass(ctx)
+		// A process cancelled before the loop starts -- during startup, or by a
+		// signal racing the wiring -- does not reconcile first and stop afterwards.
+		if ctx.Err() != nil {
+			return nil
+		}
+
+		l.pass(passCtx)
 
 		select {
 		case <-ctx.Done():
