@@ -12,6 +12,14 @@
 //     a cloud-init script or a `ps` line, and passing it as `--authkey=` would undo
 //     that. It goes to the child process in its environment, which is readable by root
 //     — the same root that can read the 0600 file.
+//
+//     `TS_AUTHKEY` is Tailscale's own documented variable for a non-interactive join,
+//     and a CLI too old to read it does what a CLI does with a missing key: `up` waits
+//     for a login that will never come. That is why the join is verified below rather
+//     than assumed — the failure shows up as a node that never connects, with the CLI's
+//     own words in the error, instead of as a machine that booted and quietly did
+//     nothing. A real join needs a real tailnet, so it belongs to the e2e tier; this
+//     package's tests cover what can be covered without one.
 //   - **Tailscale SSH is enabled at join time** (`--ssh`). The control plane reaches a
 //     machine over ssh, so a machine that joined without it is a machine that boots,
 //     becomes READY, and then cannot be saved. Enabling it here is what makes the

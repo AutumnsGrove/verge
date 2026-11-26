@@ -422,7 +422,12 @@ against a label nothing uses, a `Describe` of an id no server can have, a node l
 is not in the tailnet, and a document round-trip under a per-run `contract-state-<nanos>.json`.
 The round trip writes and never deletes, so the contract bucket wants a lifecycle rule rather than a
 cleanup routine — and `VERGE_R2_BUCKET` must not be the production bucket, both for that rule and
-because the round trip writes documents nobody else should read. Provisioning a real
+because the round trip writes documents nobody else should read.
+
+One thing the contract tier cannot cover, and it is worth naming so it is not mistaken for a gap in the
+tests: a real join. `cmd/verge-join` is exercised against a fake CLI, which proves what it asks the CLI
+to do and what it does with the answer, and proves nothing about whether the installed Tailscale honours
+`TS_AUTHKEY`. That needs a machine and a tailnet, which is the e2e tier. Provisioning a real
 machine, which is what the tier table promises it covers, belongs to the e2e tier: there it is the
 thing under test rather than a side effect of checking a decoder, and it is the only part that costs
 money. Nothing schedules them yet — the workflow row above is still "plan".
