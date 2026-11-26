@@ -83,17 +83,22 @@ var (
 
 // Usage is what one request cost, in tokens.
 //
+// Input is the whole prompt: every token the request sent, of which Cached and CacheWrite
+// are the two subsets a provider charges differently for. The three protocols disagree
+// about whether that total is stated or implied, which is why the parser computes it -- see
+// usageObject -- rather than copying a field.
+//
 // Priced and Cost are the upstream's own answer, when it gave one (OpenRouter does); an
-// empty Cost means the ledger prices the tokens itself. Cached is the *read* subset of
-// Input, because that is the only part every one of the three protocols reports: Anthropic's
-// cache writes are charged as input, so they stay in Input.
+// empty Cost means the ledger prices the tokens itself. CacheWrite is Anthropic-only:
+// OpenAI and OpenRouter report cache reads and nothing about writes.
 //
 // Every field is clamped at zero in parsing. A negative token count from an upstream would
 // otherwise be a way to *lower* a session's spend and walk straight through its cap.
 type Usage struct {
-	Input  int64
-	Output int64
-	Cached int64
+	Input      int64
+	Output     int64
+	Cached     int64
+	CacheWrite int64
 
 	// Cost is the upstream's charge in USD, when it reported one.
 	Cost float64
@@ -116,7 +121,14 @@ func (u *Usage) merge(next Usage) {
 	if next.Cached > u.Cached {
 		u.Cached = next.Cached
 	}
-	if next.Reported && next.Cost > 0 {
+	if next.CacheWrite > u.CacheWrite {
+		u.CacheWrite = next.CacheWrite
+	}
+	// The last cost the upstream reported wins, zero included. A stream whose final usage
+	// says cost 0 is a free request, not an absent answer -- and treating the two differently
+	// meant the same response was billed from the price table when it streamed and recorded
+	// as free when it did not.
+	if next.Reported {
 		u.Cost = next.Cost
 		u.Reported = true
 	}
@@ -206,9 +218,27 @@ func usageObject(protocol Protocol, root map[string]json.RawMessage) (Usage, boo
 
 	switch protocol {
 	case Anthropic:
-		read("input_tokens", &u.Input)
+		// Anthropic's three prompt counts are disjoint, not nested: input_tokens is the
+		// uncached remainder. Reading input_tokens as the total under-bills every cached
+		// prompt -- and a long cached session is exactly where a cap has to be honest --
+		// while dropping cache_creation_input_tokens loses the most expensive tokens of all.
+		var uncached, cached, written int64
+		if n, ok := number(counts["input_tokens"]); ok {
+			uncached = clampNegative(n)
+			present = true
+		}
+		if n, ok := number(counts["cache_read_input_tokens"]); ok {
+			cached = clampNegative(n)
+			present = true
+		}
+		if n, ok := number(counts["cache_creation_input_tokens"]); ok {
+			written = clampNegative(n)
+			present = true
+		}
+		u.Input = uncached + cached + written
+		u.Cached = cached
+		u.CacheWrite = written
 		read("output_tokens", &u.Output)
-		read("cache_read_input_tokens", &u.Cached)
 	case OpenAI, OpenRouter:
 		read("prompt_tokens", &u.Input)
 		read("completion_tokens", &u.Output)
@@ -267,10 +297,15 @@ func number(raw json.RawMessage) (int64, bool) {
 	return i, true
 }
 
-// money reads a USD amount. Negative charges are zero for the same reason negative tokens
-// are: spend must not go down.
+// money reads a USD amount.
+//
+// A JSON null decodes into a float64 without an error and leaves it zero, so "cost": null
+// would otherwise be the answer "this request was free" -- a million tokens recorded as
+// priced at nothing, and a cap that never counts them. Null, a string, a negative and a
+// non-number are all "the upstream did not say", which falls back to the price table; an
+// explicit zero is an answer and is charged as one.
 func money(raw json.RawMessage) (float64, bool) {
-	if len(raw) == 0 {
+	if len(raw) == 0 || raw[0] == 'n' || raw[0] == '"' || raw[0] == '[' || raw[0] == '{' || raw[0] == 't' || raw[0] == 'f' {
 		return 0, false
 	}
 	var f float64
@@ -278,7 +313,9 @@ func money(raw json.RawMessage) (float64, bool) {
 		return 0, false
 	}
 	if f < 0 {
-		return 0, true
+		// A negative charge is not an answer either: fall back to the table rather than
+		// recording a free request.
+		return 0, false
 	}
 	return f, true
 }

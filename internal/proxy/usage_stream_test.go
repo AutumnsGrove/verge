@@ -29,7 +29,8 @@ func TestUsageFromJSON(t *testing.T) {
 		if err != nil {
 			t.Fatalf("UsageFromJSON: %v", err)
 		}
-		want := proxy.Usage{Input: 25, Output: 7, Cached: 10}
+		// Anthropic's three prompt counts are disjoint: Input is their total.
+		want := proxy.Usage{Input: 40, Output: 7, Cached: 10, CacheWrite: 5}
 		if u != want {
 			t.Fatalf("usage = %+v, want %+v", u, want)
 		}
@@ -81,6 +82,51 @@ func TestUsageFromJSON(t *testing.T) {
 					t.Fatalf("UsageFromJSON = %v, want ErrNotJSON or ErrNoUsage", err)
 				}
 			})
+		}
+	})
+
+	t.Run("bad/anthropic_cache_writes_are_prompt_tokens", func(t *testing.T) {
+		// The finding this case exists for: Anthropic reports 10 uncached, 5k cache reads and
+		// 900k cache writes as three disjoint counts. Reading input_tokens as the total billed
+		// 10 tokens for a 905,010-token prompt -- the longest, most cached sessions, which is
+		// exactly where a cap has to be honest.
+		body := `{"usage":{"input_tokens":10,"cache_read_input_tokens":5000,"cache_creation_input_tokens":900000,"output_tokens":1}}`
+		u, err := proxy.UsageFromJSON(proxy.Anthropic, []byte(body))
+		if err != nil {
+			t.Fatalf("UsageFromJSON: %v", err)
+		}
+		want := proxy.Usage{Input: 905010, Output: 1, Cached: 5000, CacheWrite: 900000}
+		if u != want {
+			t.Fatalf("usage = %+v, want %+v", u, want)
+		}
+	})
+
+	t.Run("bad/a_null_cost_is_not_a_free_request", func(t *testing.T) {
+		// "cost": null decodes into a float64 as zero without an error. Read as an answer, a
+		// million tokens become a priced request at nothing and the cap never counts it.
+		body := `{"usage":{"prompt_tokens":1000000,"completion_tokens":1000000,"cost":null}}`
+		u, err := proxy.UsageFromJSON(proxy.OpenRouter, []byte(body))
+		if err != nil {
+			t.Fatalf("UsageFromJSON: %v", err)
+		}
+		if u.Reported {
+			t.Fatalf("usage = %+v, want no reported cost", u)
+		}
+		if u.Input != 1_000_000 || u.Output != 1_000_000 {
+			t.Fatalf("usage = %+v, want the token counts kept", u)
+		}
+	})
+
+	t.Run("happy/an_explicit_zero_cost_is_an_answer", func(t *testing.T) {
+		// The other side of the same rule: zero is what a free model charges, and it is the
+		// upstream saying so rather than saying nothing.
+		body := `{"usage":{"prompt_tokens":12,"completion_tokens":3,"cost":0}}`
+		u, err := proxy.UsageFromJSON(proxy.OpenRouter, []byte(body))
+		if err != nil {
+			t.Fatalf("UsageFromJSON: %v", err)
+		}
+		if !u.Reported || u.Cost != 0 {
+			t.Fatalf("usage = %+v, want a reported cost of 0", u)
 		}
 	})
 
@@ -144,7 +190,7 @@ func TestStream(t *testing.T) {
 		if !ok {
 			t.Fatal("the stream reported no usage")
 		}
-		want := proxy.Usage{Input: 25, Output: 42, Cached: 10}
+		want := proxy.Usage{Input: 35, Output: 42, Cached: 10}
 		if u != want {
 			t.Fatalf("usage = %+v, want %+v", u, want)
 		}
@@ -174,7 +220,7 @@ func TestStream(t *testing.T) {
 			}
 		}
 		u, ok := s.Usage()
-		if !ok || u.Output != 42 || u.Input != 25 {
+		if !ok || u.Output != 42 || u.Input != 35 {
 			t.Fatalf("byte-at-a-time usage = %+v (%v), want the whole-body answer", u, ok)
 		}
 	})
@@ -208,6 +254,24 @@ func TestStream(t *testing.T) {
 		u, ok := parse(t, proxy.OpenAI, body)
 		if !ok || u.Input != 4 {
 			t.Fatalf("usage = %+v (%v), want the cut-off event", u, ok)
+		}
+	})
+
+	t.Run("happy/a_reported_cost_uses_the_same_rule_streamed_or_not", func(t *testing.T) {
+		// The same upstream answer must be billed the same way whether it arrived as one body
+		// or as events: the last reported cost wins, zero included.
+		streamed := "data: {\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3,\"cost\":0}}\n\n" +
+			"data: {\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3,\"cost\":0.0007}}\n\n" +
+			"data: [DONE]\n\n"
+		u, ok := parse(t, proxy.OpenRouter, streamed)
+		if !ok || !u.Reported || u.Cost != 0.0007 {
+			t.Fatalf("usage = %+v (%v), want the last reported cost", u, ok)
+		}
+
+		zero := "data: {\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3,\"cost\":0}}\n\ndata: [DONE]\n\n"
+		u, ok = parse(t, proxy.OpenRouter, zero)
+		if !ok || !u.Reported || u.Cost != 0 {
+			t.Fatalf("usage = %+v (%v), want a reported cost of 0, as the one-shot path gives", u, ok)
 		}
 	})
 

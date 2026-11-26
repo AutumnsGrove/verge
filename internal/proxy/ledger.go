@@ -9,13 +9,16 @@ import (
 
 // Price is what one model charges, in USD per million tokens.
 //
-// Cached is the price of a cache *read*; a cache write is charged at the model's input
-// price here, which is why Usage keeps it inside Input. A deployment that wants write
-// pricing has to split the field, and the day it does, this comment is the diff.
+// Cached is the price of a cache *read* and CacheWrite of a cache write, which every
+// provider prices above input (a write costs the provider a computation). **A table that
+// leaves CacheWrite at zero charges writes nothing**: there is no default, because "zero
+// means free" and "zero means input" are both plausible and guessing one would be a silent
+// under-charge either way. Set it.
 type Price struct {
-	Input  float64
-	Output float64
-	Cached float64
+	Input      float64
+	Output     float64
+	Cached     float64
+	CacheWrite float64
 }
 
 // Pricing is the price table, keyed by model id as the caller wrote it.
@@ -31,14 +34,23 @@ func (p Pricing) Cost(model string, u Usage) (float64, bool) {
 	if !ok {
 		return 0, false
 	}
-	// Cached tokens are billed at the cached rate and are part of Input, so the difference
-	// is billed at the input rate.
-	full := u.Input - u.Cached
+	// Input is the whole prompt, and the two cached subsets are billed at their own rates;
+	// the remainder is billed at the input rate. Each subtraction is clamped on its own, so
+	// an upstream that reports a subset larger than its total cannot produce a refund.
+	cached, written := u.Cached, u.CacheWrite
+	if cached < 0 {
+		cached = 0
+	}
+	if written < 0 {
+		written = 0
+	}
+	full := u.Input - cached - written
 	if full < 0 {
 		full = 0
 	}
 	usd := float64(full)/1e6*price.Input +
-		float64(u.Cached)/1e6*price.Cached +
+		float64(cached)/1e6*price.Cached +
+		float64(written)/1e6*price.CacheWrite +
 		float64(u.Output)/1e6*price.Output
 	if usd < 0 {
 		usd = 0

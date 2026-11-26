@@ -15,7 +15,7 @@ var day2 = day1.Add(24 * time.Hour)
 // prices is a table shaped like a real one: per million tokens, output dearer than input,
 // cache reads far cheaper.
 var prices = proxy.Pricing{
-	"cheap/model": {Input: 3, Output: 15, Cached: 0.3},
+	"cheap/model": {Input: 3, Output: 15, Cached: 0.3, CacheWrite: 3.75},
 }
 
 func newLedger(t *testing.T, caps proxy.Caps) *proxy.Ledger {
@@ -37,6 +37,18 @@ func TestPricing(t *testing.T) {
 		want := 1.5 + 0.15 + 1.5
 		if diff := cost - want; diff > 1e-9 || diff < -1e-9 {
 			t.Fatalf("cost = %v, want %v", cost, want)
+		}
+	})
+
+	t.Run("happy/cache_writes_are_billed_at_the_write_rate", func(t *testing.T) {
+		// A write costs the provider a computation and is priced above input; dropping the
+		// field, as the first version did for Anthropic, billed the dearest tokens at nothing.
+		cost, ok := prices.Cost("cheap/model", proxy.Usage{Input: 1_000_000, CacheWrite: 1_000_000})
+		if !ok {
+			t.Fatal("the model was not in the table")
+		}
+		if diff := cost - 3.75; diff > 1e-9 || diff < -1e-9 {
+			t.Fatalf("cost = %v, want 3.75", cost)
 		}
 	})
 
@@ -81,6 +93,24 @@ func TestLedger(t *testing.T) {
 		row := l.Record("s-one", "cheap/model", u, day1)
 		if row.Cost != 0.25 {
 			t.Fatalf("cost = %v, want the router's 0.25", row.Cost)
+		}
+	})
+
+	t.Run("bad/a_null_cost_falls_back_to_the_table", func(t *testing.T) {
+		// End to end through the parser: the upstream said nothing about money, so the table
+		// prices the tokens instead of the request being recorded as priced at nothing.
+		body := `{"usage":{"prompt_tokens":1000000,"completion_tokens":0,"cost":null}}`
+		u, err := proxy.UsageFromJSON(proxy.OpenRouter, []byte(body))
+		if err != nil {
+			t.Fatalf("UsageFromJSON: %v", err)
+		}
+		l := newLedger(t, proxy.Caps{})
+		row := l.Record("s-one", "cheap/model", u, day1)
+		if !row.Priced {
+			t.Fatal("the row was not priced by the table")
+		}
+		if diff := row.Cost - 3; diff > 1e-9 || diff < -1e-9 {
+			t.Fatalf("cost = %v, want the table's 3.00", row.Cost)
 		}
 	})
 

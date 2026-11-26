@@ -31,8 +31,14 @@ What it understands is usage, from the place each protocol puts it:
 | OpenAI | the final chunk, when `stream_options.include_usage` asked for it | `prompt_tokens`, `completion_tokens`, `prompt_tokens_details.cached_tokens` |
 | OpenRouter | the same object, plus the charge | `usage.cost`, in USD |
 
-They collapse into one `Usage`: `Input`, `Output`, `Cached` (the cache-*read* subset, because that is
-the only cached number all three report), and optionally the upstream's own cost.
+They collapse into one `Usage`: `Input` (the whole prompt), `Output`, `Cached` (the cache-read subset),
+`CacheWrite` (Anthropic only), and optionally the upstream's own cost.
+
+The one trap in that table is Anthropic's: its three prompt counts are **disjoint**, not nested.
+`input_tokens` is the uncached remainder, so a parser that read it as the total would bill a
+905,010-token cached prompt as 10 tokens -- and a long cached session is exactly where a cap has
+to be honest. `Input` is therefore computed, not copied, and the two subsets are billed at their
+own rates.
 
 ## Decisions this package made
 
@@ -45,9 +51,13 @@ the only cached number all three report), and optionally the upstream's own cost
    a `json.Number`, so the refusal is explicit.
 3. **A negative count is zero.** Both in parsing and again in `Ledger.Record`, because spend must not
    go *down* when an upstream says so — a negative that reached the ledger would walk a session
-   straight through its cap.
+   straight through its cap. A `null` or non-numeric cost is *not* an answer: `encoding/json`
+   decodes `"cost": null` into a zero without an error, which read as an answer would make a million
+   tokens a priced request at nothing. It falls back to the price table instead.
 4. **The upstream's own cost beats the table.** OpenRouter charges and says so; its number is better
-   than any price list kept here. The table prices everything else.
+   than any price list kept here. The last reported cost wins, **zero included** — a stream whose
+   final usage says `cost: 0` is a free request, not an absent answer, and the same response must be
+   billed the same way whether it streamed or not.
 5. **An unknown model is recorded unpriced.** Refusing would fail on every model that shipped this
    week; inventing a price would be a lie. The row carries its tokens, `Priced: false`, and zero
    cost, so the hole is visible instead of hidden.
@@ -70,20 +80,22 @@ the only cached number all three report), and optionally the upstream's own cost
   is per process lifetime. The plan's SQLite is the next piece; bolting durability onto an
   in-memory ledger would be two sources of truth on the day it mattered.
 - **Price data.** The table is configuration with nothing in it yet, because prices are not this
-  repository's to guess.
+  repository's to guess. `CacheWrite` has no default on purpose: a table that leaves it zero charges
+  cache writes nothing, and "zero means free" and "zero means input" are both plausible guesses.
 
 ## Tests
 
 Offline, against the three wire shapes as the protocols actually put them. `TestUsageFromJSON`
-covers the non-streamed bodies, `TestStream` the event streams (chunking, CRLF, comments,
-multi-line `data:`, an unterminated last event, a refused enormous line), `TestPricing` and
-`TestLedger` the money (cached rates, an unknown model, an upstream cost, both caps, the day
-boundary, concurrent requests under `-race`).
+covers the non-streamed bodies (including Anthropic's disjoint counts and a `null` cost),
+`TestStream` the event streams (chunking, CRLF, comments, multi-line `data:`, an unterminated last
+event, a refused enormous line, and a reported cost handled the same way streamed or not),
+`TestPricing` and `TestLedger` the money (cached-read and cache-write rates, an unknown model, an
+upstream cost, both caps, the day boundary, concurrent requests under `-race`).
 
 `FuzzStream` asserts chunking-independence, non-negative usage, and that `Write` never refuses
 bytes, over all three protocols. Seeds include the hostile shapes: HTML, negative counts, quoted
 numbers.
 
-Mutation-checked: removing the quoted-number refusal, the negative clamp (in both places), the
-upstream-cost preference, the day rollover, or the dispatch of an unterminated final event each
-fails a case that exists for it.
+Mutation-checked: removing the quoted-number refusal, the `null`-cost refusal, either negative
+clamp, the Anthropic total, the upstream-cost preference (or its zero rule), the day rollover, or the
+dispatch of an unterminated final event each fails a case that exists for it.
