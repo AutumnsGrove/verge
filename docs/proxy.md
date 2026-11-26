@@ -49,11 +49,13 @@ own rates.
    behind a 200 is `ErrNotJSON`; a JSON body with no usage is `ErrNoUsage`; a body whose counts are
    strings is `ErrNoUsage` rather than a guessed number. `encoding/json` accepts a quoted number into
    a `json.Number`, so the refusal is explicit.
-3. **A negative count is zero.** Both in parsing and again in `Ledger.Record`, because spend must not
-   go *down* when an upstream says so — a negative that reached the ledger would walk a session
-   straight through its cap. A `null` or non-numeric cost is *not* an answer: `encoding/json`
-   decodes `"cost": null` into a zero without an error, which read as an answer would make a million
-   tokens a priced request at nothing. It falls back to the price table instead.
+3. **A negative count is zero, and nonsense is not an answer.** Both in parsing and again in
+   `Ledger.Record`, because spend must not go *down* when an upstream says so. A `null` or
+   non-numeric cost falls back to the price table: `encoding/json` decodes `"cost": null` into a zero
+   without an error, which read as an answer would make a million tokens a priced request at nothing.
+   A `NaN` or infinite cost is the same — no JSON can carry one, so only a caller can build it, and a
+   `NaN` total would make every later cap comparison false forever. Anthropic's computed total
+   saturates rather than wrapping: three hostile `MaxInt64` counts must not become a negative prompt.
 4. **The upstream's own cost beats the table.** OpenRouter charges and says so; its number is better
    than any price list kept here. The last reported cost wins, **zero included** — a stream whose
    final usage says `cost: 0` is a free request, not an absent answer, and the same response must be
@@ -64,11 +66,15 @@ own rates.
 6. **A cap is a gate, not a hard ceiling.** The check happens before the upstream request, because a
    request refused after it was sent was billed anyway. The request that crosses the line finishes.
    Making it exact would need the cost of output that has not been generated.
-7. **The day is UTC.** Machines and the control plane have to agree on when a day ends, and only
-   UTC is a fact for both.
+7. **The day is UTC, and it rolls forward only.** Machines and the control plane have to agree on
+   when a day ends, and only UTC is a fact for both. Forward only because two requests straddling
+   midnight can finish out of order, and an older timestamp rolling the counter back would zero
+   today's spend — a cap bypass at every midnight for anyone who can make two concurrent calls.
 8. **Chunk boundaries do not matter.** SSE framing is parsed from a byte stream, so TCP decides
    where records split and the parser must not. `FuzzStream` asserts that the same body parses the
-   same way one byte at a time as in one write.
+   same way one byte at a time as in one write. CRLF is framing too: a `\r` before the newline is
+   trimmed, because a CRLF blank line is only blank after the trim, and an event that is never blank
+   is an event that is never dispatched.
 
 ## Not built yet
 
@@ -97,5 +103,7 @@ bytes, over all three protocols. Seeds include the hostile shapes: HTML, negativ
 numbers.
 
 Mutation-checked: removing the quoted-number refusal, the `null`-cost refusal, either negative
-clamp, the Anthropic total, the upstream-cost preference (or its zero rule), the day rollover, or the
-dispatch of an unterminated final event each fails a case that exists for it.
+clamp, the Anthropic total, the saturating add, the CR trim, either cap's `>=`, `.UTC()`, the
+forward-only roll, the `Output`/`CacheWrite` merge, the `NaN` guard, the price validation, the
+upstream-cost preference (or its zero rule), the day rollover, or the dispatch of an unterminated
+final event each fails a case that exists for it.

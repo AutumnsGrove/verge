@@ -235,7 +235,9 @@ func usageObject(protocol Protocol, root map[string]json.RawMessage) (Usage, boo
 			written = clampNegative(n)
 			present = true
 		}
-		u.Input = uncached + cached + written
+		// Add rather than multiply in int64: hostile counts can each be MaxInt64 and the sum
+		// would wrap negative, which is a cap bypass built out of a type.
+		u.Input = saturatingAdd(saturatingAdd(uncached, cached), written)
 		u.Cached = cached
 		u.CacheWrite = written
 		read("output_tokens", &u.Output)
@@ -319,6 +321,16 @@ func money(raw json.RawMessage) (float64, bool) {
 	}
 	return f, true
 }
+
+// saturatingAdd adds two non-negative counts without wrapping.
+func saturatingAdd(a, b int64) int64 {
+	if a > mathMaxInt64-b {
+		return mathMaxInt64
+	}
+	return a + b
+}
+
+const mathMaxInt64 = int64(^uint64(0) >> 1)
 
 func clampNegative(n int64) int64 {
 	if n < 0 {

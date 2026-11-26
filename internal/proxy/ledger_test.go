@@ -2,6 +2,7 @@ package proxy_test
 
 import (
 	"errors"
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -186,11 +187,96 @@ func TestLedger(t *testing.T) {
 		}
 	})
 
-	t.Run("bad/negative_caps_are_refused", func(t *testing.T) {
+	t.Run("sad/spending_exactly_the_cap_is_over_it", func(t *testing.T) {
+		// ">=", not ">": a cap of $1 is reached at $1. The two caps are checked on separate
+		// ledgers, because a day cap firing would mask a session cap that never did.
+		for name, caps := range map[string]proxy.Caps{
+			"session": {PerSession: 1},
+			"day":     {PerDay: 1},
+		} {
+			t.Run(name, func(t *testing.T) {
+				l, err := proxy.NewLedger(proxy.Pricing{"flat/model": {Input: 1}}, caps)
+				if err != nil {
+					t.Fatalf("NewLedger: %v", err)
+				}
+				l.Record("s-one", "flat/model", proxy.Usage{Input: 1_000_000}, day1) // exactly $1
+				if err := l.Check("s-one", day1); !errors.Is(err, proxy.ErrCapReached) {
+					t.Fatalf("Check = %v, want %v at exactly the cap", err, proxy.ErrCapReached)
+				}
+			})
+		}
+	})
+
+	t.Run("sad/the_day_is_utc_not_local", func(t *testing.T) {
+		// A day cap is a UTC boundary, and every test time was already UTC, so dropping .UTC()
+		// survived. These instants are chosen so local date and UTC date disagree.
+		l := newLedger(t, proxy.Caps{PerDay: 1})
+		first := time.Date(2026, 11, 26, 23, 0, 0, 0, time.UTC)
+		l.Record("s-one", "cheap/model", proxy.Usage{Input: 400_000}, first) // $1.20, UTC 26th
+
+		// UTC 27th, but still the 26th at UTC-10. The day must have rolled.
+		next := time.Date(2026, 11, 27, 5, 0, 0, 0, time.UTC).In(time.FixedZone("UTC-10", -10*3600))
+		if err := l.Check("s-two", next); err != nil {
+			t.Fatalf("Check on the next UTC day = %v, want the day counter reset", err)
+		}
+
+		// And an instant in the same UTC day, expressed in a zone where the date is already
+		// the 28th, must not roll again.
+		l.Record("s-two", "cheap/model", proxy.Usage{Input: 400_000}, next)
+		later := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC).In(time.FixedZone("UTC+14", 14*3600))
+		if err := l.Check("s-three", later); !errors.Is(err, proxy.ErrCapReached) {
+			t.Fatalf("Check = %v, want %v within the same UTC day", err, proxy.ErrCapReached)
+		}
+	})
+
+	t.Run("sad/a_late_arrival_from_an_earlier_day_does_not_reset_the_day", func(t *testing.T) {
+		// Two requests straddling midnight can finish out of order. A roll that accepted the
+		// older timestamp would zero today's spend -- a day cap bypass at every midnight, for
+		// anyone who can make two concurrent requests.
+		l := newLedger(t, proxy.Caps{PerDay: 1})
+		l.Record("s-one", "cheap/model", proxy.Usage{Input: 400_000}, day2) // $1.20, the day is the 27th
+		if err := l.Check("s-two", day1); !errors.Is(err, proxy.ErrCapReached) {
+			t.Fatalf("Check with an earlier timestamp = %v, want %v", err, proxy.ErrCapReached)
+		}
+	})
+
+	t.Run("bad/a_nan_cost_is_not_an_answer", func(t *testing.T) {
+		// NaN makes every "spent >= cap" false forever. JSON cannot carry it, so only an
+		// exported Record can be handed one -- which is exactly why it is guarded.
+		l := newLedger(t, proxy.Caps{PerSession: 1})
+		// A nonsense cost falls back to the table rather than becoming free money: a million
+		// tokens are not $0 because the upstream's number was NaN.
+		row := l.Record("s-one", "cheap/model", proxy.Usage{Input: 1_000_000, Cost: math.NaN(), Reported: true}, day1)
+		if diff := row.Cost - 3; diff > 1e-9 || diff < -1e-9 {
+			t.Fatalf("cost = %v, want the table's 3.00", row.Cost)
+		}
+		l.Record("s-one", "nobody/knows", proxy.Usage{Input: 10, Cost: math.Inf(1), Reported: true}, day1)
+		if session, day := l.Spent("s-one", day1); math.IsNaN(session) || math.IsInf(day, 0) {
+			t.Fatalf("Spent = (%v, %v), want finite numbers", session, day)
+		}
+
+		l.Record("s-one", "cheap/model", proxy.Usage{Input: 400_000}, day1) // $1.20
+		if err := l.Check("s-one", day1); !errors.Is(err, proxy.ErrCapReached) {
+			t.Fatalf("Check = %v, want %v after a NaN cost", err, proxy.ErrCapReached)
+		}
+	})
+
+	t.Run("bad/negative_caps_and_prices_are_refused", func(t *testing.T) {
 		for _, caps := range []proxy.Caps{{PerSession: -1}, {PerDay: -1}} {
 			if _, err := proxy.NewLedger(nil, caps); !errors.Is(err, proxy.ErrConfig) {
 				t.Fatalf("NewLedger(%+v) = %v, want %v", caps, err, proxy.ErrConfig)
 			}
+		}
+		for name, price := range map[string]proxy.Price{
+			"negative input":  {Input: -1},
+			"NaN output":      {Output: math.NaN()},
+			"infinite cached": {Cached: math.Inf(1)},
+		} {
+			t.Run(name, func(t *testing.T) {
+				if _, err := proxy.NewLedger(proxy.Pricing{"m": price}, proxy.Caps{}); !errors.Is(err, proxy.ErrConfig) {
+					t.Fatalf("NewLedger(%+v) = %v, want %v", price, err, proxy.ErrConfig)
+				}
+			})
 		}
 	})
 

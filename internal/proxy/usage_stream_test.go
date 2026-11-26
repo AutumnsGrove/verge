@@ -155,6 +155,19 @@ func TestUsageFromJSON(t *testing.T) {
 		}
 	})
 
+	t.Run("bad/a_hostile_token_count_cannot_wrap_negative", func(t *testing.T) {
+		// Anthropic's total is a sum this package computes, and three MaxInt64 counts would
+		// wrap negative -- a cap bypass made of an integer type.
+		body := `{"usage":{"input_tokens":9223372036854775807,"cache_read_input_tokens":9223372036854775807,"output_tokens":1}}`
+		u, err := proxy.UsageFromJSON(proxy.Anthropic, []byte(body))
+		if err != nil {
+			t.Fatalf("UsageFromJSON: %v", err)
+		}
+		if u.Input <= 0 {
+			t.Fatalf("Input = %d, want a positive saturating total", u.Input)
+		}
+	})
+
 	t.Run("bad/an_unknown_protocol", func(t *testing.T) {
 		if _, err := proxy.UsageFromJSON(proxy.Protocol(9), []byte(openAIBody)); !errors.Is(err, proxy.ErrConfig) {
 			t.Fatalf("UsageFromJSON = %v, want %v", err, proxy.ErrConfig)
@@ -226,12 +239,24 @@ func TestStream(t *testing.T) {
 	})
 
 	t.Run("happy/crlf_and_comments_and_keepalives", func(t *testing.T) {
+		// Two usage events, not one: an event is only dispatched by a *blank* line, and a CRLF
+		// blank line is a CR that must be trimmed before it can be blank. With one event the
+		// final Usage() call would dispatch it anyway, and the test would pass with CR
+		// handling deleted -- while a real Anthropic stream, where input arrives on the first
+		// event and output on the second, would join both payloads into invalid JSON and lose
+		// the whole row.
 		body := ": keep-alive\r\n\r\n" +
+			"event: message_start\r\n" +
+			`data: {"type":"message_start","message":{"usage":{"input_tokens":25,"cache_creation_input_tokens":900}}}` + "\r\n\r\n" +
 			"event: message_delta\r\n" +
 			`data: {"type":"message_delta","usage":{"output_tokens":9}}` + "\r\n\r\n"
 		u, ok := parse(t, proxy.Anthropic, body)
-		if !ok || u.Output != 9 {
-			t.Fatalf("usage = %+v (%v), want 9 output tokens", u, ok)
+		if !ok {
+			t.Fatal("the CRLF stream reported no usage")
+		}
+		want := proxy.Usage{Input: 925, Output: 9, CacheWrite: 900}
+		if u != want {
+			t.Fatalf("usage = %+v, want %+v", u, want)
 		}
 	})
 
@@ -254,6 +279,22 @@ func TestStream(t *testing.T) {
 		u, ok := parse(t, proxy.OpenAI, body)
 		if !ok || u.Input != 4 {
 			t.Fatalf("usage = %+v (%v), want the cut-off event", u, ok)
+		}
+	})
+
+	t.Run("sad/a_later_smaller_event_does_not_lower_the_running_totals", func(t *testing.T) {
+		// The three protocols report running totals, so the later value is only taken when it
+		// grew. Without the max, an event that omits or under-reports a field would erase it --
+		// and Anthropic's output total arrives on an event that says nothing about the cache.
+		body := "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":42,\"cache_creation_input_tokens\":900}}}\n\n" +
+			"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n"
+		u, ok := parse(t, proxy.Anthropic, body)
+		if !ok {
+			t.Fatal("the stream reported no usage")
+		}
+		want := proxy.Usage{Input: 905, Output: 42, CacheWrite: 900}
+		if u != want {
+			t.Fatalf("usage = %+v, want %+v", u, want)
 		}
 	})
 

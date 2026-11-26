@@ -3,6 +3,7 @@ package proxy
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 )
@@ -113,6 +114,16 @@ func NewLedger(prices Pricing, caps Caps) (*Ledger, error) {
 	if caps.PerSession < 0 || caps.PerDay < 0 {
 		return nil, fmt.Errorf("%w: a cap cannot be negative", ErrConfig)
 	}
+	for model, price := range prices {
+		for name, value := range map[string]float64{
+			"input": price.Input, "output": price.Output,
+			"cached": price.Cached, "cache write": price.CacheWrite,
+		} {
+			if value < 0 || math.IsNaN(value) || math.IsInf(value, 0) {
+				return nil, fmt.Errorf("%w: the %s price of %q is not a price", ErrConfig, name, model)
+			}
+		}
+	}
 	if prices == nil {
 		prices = Pricing{}
 	}
@@ -150,6 +161,13 @@ func (l *Ledger) Check(session string, now time.Time) error {
 // recorded with a zero cost and Priced false: inventing a price would be worse than leaving
 // a visible hole, and refusing the request would be a proxy that fails on a new model.
 func (l *Ledger) Record(session, model string, u Usage, now time.Time) Row {
+	// A NaN or infinite cost is something JSON cannot express, so only a caller can build it
+	// -- and a NaN total makes every later "spent >= cap" false forever. It is not an answer,
+	// so the table prices the tokens instead.
+	if u.Reported && (math.IsNaN(u.Cost) || math.IsInf(u.Cost, 0)) {
+		u.Cost, u.Reported = 0, false
+	}
+
 	row := Row{Session: session, Model: model, Usage: u, At: now}
 
 	if u.Reported {
@@ -159,7 +177,7 @@ func (l *Ledger) Record(session, model string, u Usage, now time.Time) Row {
 	}
 	// The parser clamps, and this clamps again because Record is exported: a caller that
 	// built a Usage itself must not be able to refund a session by passing a negative.
-	if row.Cost < 0 {
+	if row.Cost < 0 || math.IsNaN(row.Cost) || math.IsInf(row.Cost, 0) {
 		row.Cost = 0
 	}
 
@@ -179,13 +197,18 @@ func (l *Ledger) Spent(session string, now time.Time) (sessionUSD, dayUSD float6
 	return l.sessions[session], l.spent
 }
 
-// roll moves the day's counter when the date changed.
+// roll moves the day's counter when the date changed, forward only.
 //
 // The key is UTC because a day cap is not a local boundary: a deployment's machines and its
 // control plane need to agree on when a day ends, and only UTC is a fact for both.
+//
+// Forward only, because two requests straddling midnight can finish out of order: the older
+// timestamp arriving second would otherwise roll the counter *back* and zero today's spend --
+// one free day's worth of requests per midnight, for anyone able to make two concurrent calls.
 func (l *Ledger) roll(now time.Time) {
 	today := dayOf(now)
-	if today != l.today {
+	// ISO dates compare as strings, and every date a clock can produce has the same width.
+	if today > l.today {
 		l.today = today
 		l.spent = 0
 	}
