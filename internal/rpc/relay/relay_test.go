@@ -98,6 +98,41 @@ func TestReader(t *testing.T) {
 		}
 	})
 
+	t.Run("sad/aread_error_mid_record_is_not_a_shorter_record", func(t *testing.T) {
+		// A broken pipe or a dropped connection is how a pi stream normally ends badly,
+		// and forwarding the fragment would hand the far side a piece of JSON to reject --
+		// which is exactly the failure this package exists to prevent.
+		boom := errors.New("connection reset")
+		r := relay.NewReader(io.MultiReader(
+			strings.NewReader(`{"a":12`),
+			errReader{err: boom},
+		))
+		rec, err := r.Next()
+		if !errors.Is(err, boom) {
+			t.Fatalf("Next = (%q, %v), want the read error", rec, err)
+		}
+		if rec != nil {
+			t.Fatalf("Next returned the fragment %q alongside the error", rec)
+		}
+	})
+
+	t.Run("sad/a_record_of_exactly_the_limit_with_crlf", func(t *testing.T) {
+		// The limit is on the record, and the CR is framing: the same content must be
+		// accepted whether it arrived with LF or CRLF.
+		const limit = 16
+		body := strings.Repeat("x", limit)
+		for _, framing := range []string{"\n", "\r\n"} {
+			r := relay.NewReaderLimit(strings.NewReader(body+framing), limit)
+			rec, err := r.Next()
+			if err != nil {
+				t.Fatalf("limit %d with %q framing: %v", limit, framing, err)
+			}
+			if string(rec) != body {
+				t.Fatalf("record = %q, want %q", rec, body)
+			}
+		}
+	})
+
 	t.Run("sad/a_record_over_the_limit", func(t *testing.T) {
 		// A reader that grows with its input is a reader a machine can exhaust by writing
 		// one enormous line. The limit is a limit on the record, not on the stream.
@@ -187,6 +222,31 @@ func TestWriter(t *testing.T) {
 		}
 	})
 
+	t.Run("bad/a_record_ending_in_cr", func(t *testing.T) {
+		// The reader strips a CR before the LF as framing, so writing a record that ends
+		// in one would come back a byte shorter. Refusing it here keeps the encoding
+		// reversible instead of silently lossy.
+		var buf bytes.Buffer
+		w := relay.NewWriter(&buf)
+		if err := w.Write([]byte("x\r")); !errors.Is(err, relay.ErrRecordEndsWithCR) {
+			t.Fatalf("Write = %v, want %v", err, relay.ErrRecordEndsWithCR)
+		}
+		if buf.Len() != 0 {
+			t.Fatalf("wrote %d bytes for a refused record", buf.Len())
+		}
+	})
+
+	t.Run("sad/a_record_over_the_writers_limit", func(t *testing.T) {
+		var buf bytes.Buffer
+		w := relay.NewWriter(&buf)
+		if err := w.Write(make([]byte, relay.DefaultLimit+1)); !errors.Is(err, relay.ErrRecordTooLong) {
+			t.Fatalf("Write = %v, want %v", err, relay.ErrRecordTooLong)
+		}
+		if buf.Len() != 0 {
+			t.Fatalf("wrote %d bytes for an oversized record", buf.Len())
+		}
+	})
+
 	t.Run("sad/the_writer_fails", func(t *testing.T) {
 		boom := errors.New("broken pipe")
 		w := relay.NewWriter(failingWriter{err: boom})
@@ -212,6 +272,11 @@ func TestWriter(t *testing.T) {
 		}
 	})
 }
+
+// errReader fails after whatever it was paired with has been read.
+type errReader struct{ err error }
+
+func (e errReader) Read([]byte) (int, error) { return 0, e.err }
 
 // failingWriter is the sink that cannot: a pipe that closed under the relay.
 type failingWriter struct{ err error }

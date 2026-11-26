@@ -41,6 +41,12 @@ var ErrRecordTooLong = errors.New("relay: record exceeds the limit")
 // two records and leave the far side with a fragment of JSON to reject.
 var ErrRecordHasLF = errors.New("relay: a record cannot contain an LF")
 
+// ErrRecordEndsWithCR means a record being written ends with a CR. Writing it would
+// produce CRLF, and the reader would strip that CR as framing, so the record would come
+// back one byte shorter -- a silent corruption at the one place the encoding is meant to
+// be reversible.
+var ErrRecordEndsWithCR = errors.New("relay: a record cannot end with a CR")
+
 // Reader reads LF-framed records.
 //
 // It is not safe for concurrent use; a stream has one reader, and a relay with two
@@ -75,54 +81,59 @@ func NewReaderLimit(r io.Reader, limit int) *Reader {
 // record means; a caller that rejects empty records can, without this package having
 // invented a rule the protocol does not have.
 func (r *Reader) Next() ([]byte, error) {
-	var (
-		rec  []byte
-		err  error
-		done bool
-	)
+	var rec []byte
 
 	for {
-		var chunk []byte
-		chunk, err = r.br.ReadSlice('\n')
+		chunk, err := r.br.ReadSlice('\n')
 		switch {
 		case errors.Is(err, bufio.ErrBufferFull):
-			// No newline yet: this is a fragment of a long record.
-			//
-			// The check here is a memory bound rather than a behaviour one, and that is
-			// worth saying because it cannot be tested: removing it changes nothing a
-			// caller can observe, since the record is still refused at the end. What it
-			// prevents is accumulating a line of any size in memory before the end is
-			// reached, which on a stream from a machine is the difference between a
-			// refused record and an exhausted control plane.
 			rec = append(rec, chunk...)
-			if len(rec) > r.limit {
+			// The bound on the accumulating buffer is one byte past the limit, because
+			// the byte before the newline may be the CR that framing will strip: a
+			// record whose content is exactly the limit arrives one byte over.
+			//
+			// This check bounds memory, and that is all it does -- the same input is
+			// refused by finish below. It exists so a single enormous line is refused
+			// before it is accumulated, and a mutation that removes it is invisible to
+			// any test by construction.
+			if len(rec) > r.limit+1 {
 				return nil, fmt.Errorf("%w: over %d bytes", ErrRecordTooLong, r.limit)
 			}
 			continue
+
+		case err == nil:
+			// The chunk ends with the framing LF, which is not content.
+			rec = append(rec, chunk[:len(chunk)-1]...)
+			return r.finish(rec)
+
 		case errors.Is(err, io.EOF):
 			rec = append(rec, chunk...)
-			done = true
-		default:
-			rec = append(rec, chunk...)
-		}
-
-		if done {
 			if len(rec) == 0 {
 				return nil, io.EOF
 			}
-			if len(rec) > r.limit {
-				return nil, fmt.Errorf("%w: over %d bytes", ErrRecordTooLong, r.limit)
-			}
-			return stripCR(rec), nil
-		}
+			return r.finish(rec)
 
-		// Strip the framing LF, then the CR that may precede it.
-		rec = rec[:len(rec)-1]
-		if len(rec) > r.limit {
-			return nil, fmt.Errorf("%w: over %d bytes", ErrRecordTooLong, r.limit)
+		default:
+			// A read error is not a shorter record. Forwarding the fragment would hand
+			// the far side a piece of JSON to reject, which is the failure this package
+			// exists to prevent -- and it is how a broken pipe or a dropped connection
+			// would end a session.
+			return nil, err
 		}
-		return stripCR(rec), nil
 	}
+}
+
+// finish strips the framing CR and enforces the limit on the content.
+//
+// The limit is checked after the CR is stripped, so a record of exactly limit bytes
+// arrives accepted whether it was sent with LF or CRLF: the limit is on the record, and
+// the CR is framing.
+func (r *Reader) finish(rec []byte) ([]byte, error) {
+	rec = stripCR(rec)
+	if len(rec) > r.limit {
+		return nil, fmt.Errorf("%w: over %d bytes", ErrRecordTooLong, r.limit)
+	}
+	return rec, nil
 }
 
 // stripCR removes the carriage return that CRLF framing leaves behind.
@@ -156,6 +167,9 @@ func (w *Writer) Write(rec []byte) error {
 		if b == '\n' {
 			return ErrRecordHasLF
 		}
+	}
+	if n := len(rec); n > 0 && rec[n-1] == '\r' {
+		return ErrRecordEndsWithCR
 	}
 
 	// One buffer, one Write: see the type comment.
