@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/AutumnsGrove/verge/internal/config"
 )
 
 // env is a complete environment, so a test that cares about one variable does not
@@ -75,22 +77,59 @@ func TestWorkspacePrefix(t *testing.T) {
 		if strings.Contains(got, "//") || strings.HasSuffix(got, "/") {
 			t.Fatalf("workspacePrefix(%q) = %q, want a clean prefix", label, got)
 		}
+		// The store validates its keys, and a label is "key=value", so anything the
+		// label carries that a key element cannot must be mapped rather than passed
+		// through: a prefix that fails validation would fail every save.
+		for _, r := range got {
+			ok := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.' || r == '/'
+			if !ok {
+				t.Fatalf("workspacePrefix(%q) = %q, which is not a valid key prefix", label, got)
+			}
+		}
 	}
 	if workspacePrefix("a=b") == workspacePrefix("c=d") {
 		t.Fatal("two deployments share a workspace prefix")
 	}
 }
 
-// TestNoTransportIsAnError is the difference between "the machine had nothing" and
-// "we could not ask", which is the distinction that decides whether a machine is
-// destroyed.
-func TestNoTransportIsAnError(t *testing.T) {
-	_, err := noTransport{}.Fetch(t.Context(), "fake-001", "verge-machine-1")
-	if !errors.Is(err, ErrNoTransport) {
-		t.Fatalf("Fetch = %v, want %v", err, ErrNoTransport)
+// TestBuildNeedsNoNetwork is the rule build's doc comment states: constructing the
+// clients validates them without dialling, so a bad configuration is a refusal at
+// startup rather than a failure on the first tick. The endpoint below is unroutable
+// on purpose -- if anything dialled, this would hang or time out.
+func TestBuildNeedsNoNetwork(t *testing.T) {
+	cfg := &config.Config{
+		HetznerToken:      "provider-token",
+		TailnetToken:      "tailnet-token",
+		S3AccessKey:       "access-key",
+		S3SecretKey:       "secret-key",
+		TailnetName:       "-",
+		R2Endpoint:        "http://127.0.0.1:1",
+		R2Bucket:          "verge-state",
+		R2Key:             "state.json",
+		Label:             "verge=machine",
+		Image:             "ubuntu-24.04",
+		Region:            "fsn1",
+		Size:              "cpx11",
+		Interval:          time.Minute,
+		DrainWindow:       15 * time.Minute,
+		MaxLifetime:       4 * time.Hour,
+		BootDeadline:      10 * time.Minute,
+		TerminateDeadline: 5 * time.Minute,
+		RetryBase:         30 * time.Second,
+		RetryMax:          5 * time.Minute,
+		SyncAttempts:      3,
 	}
-	if !strings.Contains(err.Error(), "fake-001") || !strings.Contains(err.Error(), "verge-machine-1") {
-		t.Fatalf("Fetch = %v, want it to name the machine by id and by host", err)
+
+	f, err := build(cfg)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	got := f.Config()
+	if got.Syncer == nil || got.Cloud == nil || got.Network == nil || got.Store == nil {
+		t.Fatalf("build left a dependency nil: %+v", got)
+	}
+	if got.Label != cfg.Label || got.MaxLifetime != cfg.MaxLifetime {
+		t.Fatalf("build did not carry the configuration through: %+v", got)
 	}
 }
 
