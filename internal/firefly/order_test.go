@@ -177,3 +177,50 @@ func TestOrderingProperty(t *testing.T) {
 		t.Fatalf("no machine finished leaving in any generated history: the property held vacuously")
 	}
 }
+
+// TestOrderingAbandonmentIsTheRecordedException is the one sad/ case the property
+// allows: a save that can never succeed would bill forever if the hard cap also
+// refused to abandon it.
+//
+// It is checked through the same ledger as the property, which is what makes it
+// the exception's own test rather than a state assertion: the delete must be
+// preceded by an abandonment that was reported to the caller, exactly once, and
+// by no successful save at all. TestAbandonmentIsRecorded in tick_test.go
+// asserts the transition; this asserts what the transition is allowed to excuse.
+func TestOrderingAbandonmentIsTheRecordedException(t *testing.T) {
+	h := newHarness(t)
+	id := h.provision(firefly.Ready)
+	h.sync.FailAlways()
+
+	l := newLedger()
+	// FailAlways is a fault, and the ledger's rule is that abandonment is only
+	// legal in a history where a save failed. Being unable to fail differently is
+	// the eventual case of that rule, not an exemption from it.
+	l.faults = 1
+
+	now := base
+	for i := 0; i < 120 && len(l.abandoned) == 0; i++ {
+		now = now.Add(time.Minute)
+		l.observe(t, h, h.tick(now))
+	}
+
+	if len(l.abandoned) != 1 || !l.abandoned[id] {
+		t.Fatalf("abandoned = %v, want exactly [%s]", l.abandoned, id)
+	}
+	if len(l.synced) != 0 {
+		t.Fatalf("the syncer recorded successful saves %v for a save that cannot succeed", l.synced)
+	}
+
+	// Abandoned on paper is worthless unless the machine actually leaves, so keep
+	// the clock running until the provider's half resolves.
+	for i := 0; i < 120 && l.confirmed == 0; i++ {
+		now = now.Add(time.Minute)
+		l.observe(t, h, h.tick(now))
+	}
+	if l.confirmed != 1 {
+		t.Fatalf("the machine was abandoned but never left: confirmed=%d", l.confirmed)
+	}
+	if l.deletes != 1 {
+		t.Fatalf("deletes = %d, want 1: an abandonment issues exactly one delete", l.deletes)
+	}
+}
