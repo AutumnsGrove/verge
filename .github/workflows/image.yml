@@ -7,7 +7,9 @@
 #
 # It bakes exactly what the README says the image owes: the tailnet agent, verge-join and
 # verge-save. Nothing is fetched at boot, which is the property internal/cloudinit depends
-# on.
+# on -- and nothing is fetched while building it either, beyond the pinned tarballs: the
+# appliance that edits the disk has no resolver, and a version pinned here is a build that
+# does not change when nobody touched it.
 #
 # No KVM on GitHub-hosted runners, so this does not boot anything: libguestfs edits the
 # vendor's cloud image offline, which is slower than a VM boot and does not need nested
@@ -64,22 +66,49 @@ jobs:
           set -euo pipefail
           arch_dir="$(ls -d dist/verge-*-linux-amd64)"
           mkdir -p overlay
+
+          # Pinned, and fetched here rather than inside the image: the appliance that edits
+          # the disk has no resolver, and a version resolved at build time is a build that
+          # changes when nobody touched it. The static tarball needs no packages, which is
+          # also why this works on a minimal cloud image.
+          ts_version="1.104.7"
+          curl -fsSL -o tailscale.tgz "https://pkgs.tailscale.com/stable/tailscale_${ts_version}_amd64.tgz"
+          tar -xzf tailscale.tgz --strip-components=1 -C overlay \
+            "tailscale_${ts_version}_amd64/tailscale" \
+            "tailscale_${ts_version}_amd64/tailscaled"
+
           cp -a "$arch_dir/verge-join" overlay/verge-join
           cp -a "$arch_dir/verge-save" overlay/verge-save
+          cat > overlay/tailscaled.service <<'UNIT'
+          [Unit]
+          Description=Tailscale node agent
+          After=network-pre.target
+          Wants=network-pre.target
 
-          # --network gives the appliance an interface so the agent can be installed from
-          # its own repository; nothing else in this build reaches the network at boot.
-          sudo virt-customize -a base.img --network \
-            --run-command 'curl -fsSL https://tailscale.com/install.sh | sh' \
-            --run-command 'command -v tailscaled && command -v tailscale' \
-            --run-command 'systemctl enable tailscaled' \
-            --run-command 'mkdir -p /etc/verge /workspace' \
+          [Service]
+          ExecStart=/usr/local/bin/tailscaled
+          Restart=on-failure
+          StateDirectory=tailscale
+
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+
+          sudo virt-customize -a base.img \
+            --copy-in overlay/tailscaled:/usr/local/bin \
+            --copy-in overlay/tailscale:/usr/local/bin \
             --copy-in overlay/verge-join:/usr/local/bin \
             --copy-in overlay/verge-save:/usr/local/bin \
+            --copy-in overlay/tailscaled.service:/etc/systemd/system \
+            --chmod 0755:/usr/local/bin/tailscaled \
+            --chmod 0755:/usr/local/bin/tailscale \
             --chmod 0755:/usr/local/bin/verge-join \
             --chmod 0755:/usr/local/bin/verge-save \
-            --run-command 'test -x /usr/local/bin/verge-save' \
-            --run-command 'ls -l /usr/local/bin/verge-join /usr/local/bin/verge-save'
+            --run-command 'mkdir -p /etc/verge /workspace' \
+            --run-command '/usr/local/bin/tailscaled --version' \
+            --run-command '/usr/local/bin/tailscale --version' \
+            --run-command 'systemctl enable tailscaled' \
+            --run-command 'test -x /usr/local/bin/verge-join && test -x /usr/local/bin/verge-save'
 
       - name: Shrink and compress
         run: |
