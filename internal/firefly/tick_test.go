@@ -18,9 +18,20 @@ var base = time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
 
 func at(d time.Duration) time.Time { return base.Add(d) }
 
+// tb is the part of a test the harness uses, and it is all of it on purpose.
+//
+// It is satisfied by *testing.T and by *rapid.T, so the example tests in this
+// file and the property test in order_test.go share one harness rather than
+// growing a second one that drifts. A harness that needed more of *testing.T
+// would quietly become a reason not to have the property test.
+type tb interface {
+	Helper()
+	Fatalf(format string, args ...any)
+}
+
 // harness is one fake world and the firefly over it.
 type harness struct {
-	t     *testing.T
+	t     tb
 	cloud *fake.Cloud
 	net   *fake.Network
 	sync  *fake.Syncer
@@ -28,7 +39,7 @@ type harness struct {
 	f     *firefly.Firefly
 }
 
-func newHarness(t *testing.T, opts ...func(*fake.Cloud, *fake.Network)) *harness {
+func newHarness(t tb, opts ...func(*fake.Cloud, *fake.Network)) *harness {
 	t.Helper()
 	h := &harness{
 		t:     t,
