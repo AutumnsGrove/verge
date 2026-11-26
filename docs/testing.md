@@ -94,9 +94,12 @@ internal/
                               lapse, a failed start, an orderly close, a cancelled caller
     fuzz_test.go              FuzzValidID — the id becomes an unquoted shell word
   proxy/
-    stream.go
-    stream_test.go
-    stream_fuzz_test.go       FuzzStream
+    usage.go                  the three wire shapes into one Usage
+    stream.go                 SSE framing, and usage as the body is relayed
+    ledger.go                 price table, spend per session and day, the caps
+    usage_stream_test.go      the three shapes, an HTML 200, a quoted number, chunking
+    ledger_test.go            cached rates, an unknown model, both caps, the day, races
+    stream_fuzz_test.go       FuzzStream — chunking, and usage that is never negative
 cmd/verge/
   main.go                     wiring only: four clients, firefly, the loop, signals
   main_test.go                the refusals, the workspace prefix, no transport

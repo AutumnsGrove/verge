@@ -33,6 +33,11 @@ save — which is the behaviour the ordering guarantee asks for.
 the stream ends. `docs/session.md` is its design. It is tested against the fake cloud and a
 machine-side process, and nothing has run against a real machine.
 
+`internal/proxy` is the model proxy's ledger and stream parser: it reads usage out of the three
+upstream wire shapes an operator's deployment uses, prices it from a configured table (or takes
+OpenRouter's own number), and enforces per-session and per-day caps. The HTTP server that will sit on
+it — routes, session tokens, upstream dialling — does not exist yet. `docs/proxy.md` is its design.
+
 `cmd/verge` reconciles on a timer: it builds the clients, calls `Tick` on every interval, and finishes
 the pass in flight when it is interrupted. It serves no phone yet, so neither placement nor the session
 layer has a caller inside it. `docs/testing.md` names the files the rest will become, and
