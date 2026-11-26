@@ -157,6 +157,23 @@ func booting(m firefly.MachineStatus) bool {
 	return m.State == firefly.Error && m.Origin == firefly.Provisioning
 }
 
+// Seat is what Place answers: which machine, under what name, and the lease that holds
+// it, or that it is booting and the caller should ask again.
+//
+// The lease is in the answer because the caller is the one that ends it. The first version
+// returned only the machine id, which was enough for placement's own tests and not enough
+// for the first real caller: a session that could not start its process had acquired a
+// lease it could not release, and kept a machine alive for a process that never ran.
+//
+// Pending means no lease was taken. Machine is the machine to wait for, and is empty when a
+// create backed off before an id existed -- the caller's answer is the same either way.
+type Seat struct {
+	Machine firefly.MachineID
+	Name    string
+	Lease   firefly.LeaseID
+	Pending bool
+}
+
 // Place puts a lease on a machine, or starts one, or says why it cannot.
 //
 // It is not safe for concurrent use: it reads a snapshot, decides, then acts, so two
@@ -166,30 +183,30 @@ func booting(m firefly.MachineStatus) bool {
 //
 // The three answers are deliberately different calls to action:
 //
-//   - (id, true, nil): the lease is held on id, and work can start now.
-//   - (id, false, nil): no machine had room, so one is provisioning; the caller retries.
-//     It is not an error -- a boot is minutes. Every caller waiting during one boot is
-//     told the same machine, including more callers than it has seats for: the seats are
-//     handed out when the machine is READY, so the surplus callers keep waiting and the
-//     next one past capacity provisions. A boot is not a reservation, and pretending it
-//     is would mean either over-provisioning during every boot or counting demand the
-//     snapshot does not carry.
-//   - ("", false, err): nothing will change until a session ends (ErrAtCapacity), or
-//     something went wrong.
-func (p *Placement) Place(ctx context.Context, req Request, now time.Time) (firefly.MachineID, bool, error) {
+//   - a Seat with a lease: the lease is held on that machine, and work can start now.
+//   - a Seat with Pending true: no machine had room, so one is provisioning; the caller
+//     retries. It is not an error -- a boot is minutes. Every caller waiting during one
+//     boot is told the same machine, including more callers than it has seats for: the
+//     seats are handed out when the machine is READY, so the surplus callers keep waiting
+//     and the next one past capacity provisions. A boot is not a reservation, and
+//     pretending it is would mean either over-provisioning during every boot or counting
+//     demand the snapshot does not carry.
+//   - an error: nothing will change until a session ends (ErrAtCapacity), or something
+//     went wrong.
+func (p *Placement) Place(ctx context.Context, req Request, now time.Time) (Seat, error) {
 	if req.Holder == "" {
-		return "", false, errors.New("placement: a request needs a holder")
+		return Seat{}, errors.New("placement: a request needs a holder")
 	}
 	if !req.Kind.Valid() {
-		return "", false, fmt.Errorf("placement: unknown lease kind %q", req.Kind)
+		return Seat{}, fmt.Errorf("placement: unknown lease kind %q", req.Kind)
 	}
 	if req.TTL <= 0 {
-		return "", false, firefly.ErrLeaseTTL
+		return Seat{}, firefly.ErrLeaseTTL
 	}
 
 	snap, err := p.f.Snapshot(ctx, now)
 	if err != nil {
-		return "", false, fmt.Errorf("placement: reading the snapshot: %w", err)
+		return Seat{}, fmt.Errorf("placement: reading the snapshot: %w", err)
 	}
 
 	// An existing machine first, and it has to be one a lease can actually be taken on: a
@@ -205,10 +222,11 @@ func (p *Placement) Place(ctx context.Context, req Request, now time.Time) (fire
 		if m.Live >= p.capacity {
 			continue
 		}
-		if _, err := p.f.Acquire(ctx, m.ID, req.Holder, req.Kind, req.TTL, now); err != nil {
-			return "", false, fmt.Errorf("placement: acquiring on %s: %w", m.ID, err)
+		lease, err := p.f.Acquire(ctx, m.ID, req.Holder, req.Kind, req.TTL, now)
+		if err != nil {
+			return Seat{}, fmt.Errorf("placement: acquiring on %s: %w", m.ID, err)
 		}
-		return m.ID, true, nil
+		return Seat{Machine: m.ID, Name: m.Name, Lease: lease}, nil
 	}
 
 	// Nothing ready fits. If a machine is already booting, that is the answer: the caller
@@ -220,23 +238,23 @@ func (p *Placement) Place(ctx context.Context, req Request, now time.Time) (fire
 	// any tick.
 	for _, m := range snap.Machines {
 		if booting(m) {
-			return m.ID, false, nil
+			return Seat{Machine: m.ID, Name: m.Name, Pending: true}, nil
 		}
 	}
 
 	// Nothing is booting and nothing fits, so this is either a new machine or a wait that
 	// lasts until a session ends. The cap is what stops the waiting from becoming a bill.
 	if len(snap.Machines) >= p.maxMachines {
-		return "", false, ErrAtCapacity
+		return Seat{}, ErrAtCapacity
 	}
 
 	name, err := p.f.MintName(ctx)
 	if err != nil {
-		return "", false, fmt.Errorf("placement: minting a name: %w", err)
+		return Seat{}, fmt.Errorf("placement: minting a name: %w", err)
 	}
 	spec, err := p.newSpec(name)
 	if err != nil {
-		return "", false, fmt.Errorf("placement: building a spec for %s: %w", name, err)
+		return Seat{}, fmt.Errorf("placement: building a spec for %s: %w", name, err)
 	}
 	// Set here as well as rendered into the boot script, so Provision and the script cannot
 	// disagree about the name.
@@ -247,9 +265,9 @@ func (p *Placement) Place(ctx context.Context, req Request, now time.Time) (fire
 		// Backoff is not a failed placement: a create failed a moment ago and the next
 		// attempt is not due yet, so this is a "retry shortly" like a pending boot.
 		if errors.Is(err, firefly.ErrProvisioningBackoff) {
-			return "", false, nil
+			return Seat{Pending: true}, nil
 		}
-		return id, false, fmt.Errorf("placement: provisioning %s: %w", name, err)
+		return Seat{Machine: id, Name: name}, fmt.Errorf("placement: provisioning %s: %w", name, err)
 	}
-	return id, false, nil
+	return Seat{Machine: id, Name: name, Pending: true}, nil
 }

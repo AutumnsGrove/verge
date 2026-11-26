@@ -28,10 +28,15 @@ Tailscale SSH. What is still missing is the machine side of that contract: the i
 `/usr/local/bin/verge-save`, the sibling of the `verge-join` the renderer already assumes. Until it
 does, a save fails with the command's own error rather than quietly destroying a machine it could not
 save — which is the behaviour the ordering guarantee asks for.
+`internal/session` is the control plane's half of one pi session: it places the session, runs
+`pi --mode rpc` on the machine over ssh, relays JSONL in both directions, and releases the lease when
+the stream ends. `docs/session.md` is its design. It is tested against the fake cloud and a
+machine-side process, and nothing has run against a real machine.
+
 `cmd/verge` reconciles on a timer: it builds the clients, calls `Tick` on every interval, and finishes
-the pass in flight when it is interrupted. It does not provision anything yet — placement, the caller
-that decides when work needs a machine, is still to come. `docs/testing.md` names the files the rest
-will become, and `docs/firefly.md` is the design they implement.
+the pass in flight when it is interrupted. It serves no phone yet, so neither placement nor the session
+layer has a caller inside it. `docs/testing.md` names the files the rest will become, and
+`docs/firefly.md` is the mechanism's design.
 
 This repository is a fresh start in Go, on a different architecture from the version whose history
 precedes this commit. The earlier TypeScript/Cloudflare Code implementation is kept in

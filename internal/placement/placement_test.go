@@ -106,15 +106,16 @@ func (w *world) tick(t *testing.T, now time.Time) firefly.Result {
 func (w *world) bootAndReady(t *testing.T, now time.Time, holder string) firefly.MachineID {
 	t.Helper()
 
-	id, ok, err := w.p.Place(context.Background(), placement.Request{
+	seat, err := w.p.Place(context.Background(), placement.Request{
 		Holder: holder, Kind: firefly.Session, TTL: 2 * time.Hour,
 	}, now)
 	if err != nil {
 		t.Fatalf("Place: %v", err)
 	}
-	if ok {
+	if !seat.Pending {
 		t.Fatalf("Place returned a ready machine when none existed")
 	}
+	id := seat.Machine
 
 	// Tick until the machine answers, and lease it at that instant: a READY machine with
 	// no lease starts draining on the next tick, so the retry belongs at the moment it
@@ -125,11 +126,14 @@ func (w *world) bootAndReady(t *testing.T, now time.Time, holder string) firefly
 			if ev.Machine != id || ev.To != firefly.Ready {
 				continue
 			}
-			got, ok, err := w.p.Place(context.Background(), placement.Request{
+			again, err := w.p.Place(context.Background(), placement.Request{
 				Holder: holder, Kind: firefly.Session, TTL: 2 * time.Hour,
 			}, at)
-			if err != nil || !ok || got != id {
-				t.Fatalf("the retry = (%s, %v, %v), want the machine it waited for (%s)", got, ok, err, id)
+			if err != nil || again.Pending || again.Machine != id {
+				t.Fatalf("the retry = (%+v, %v), want the machine it waited for (%s)", again, err, id)
+			}
+			if again.Lease == "" {
+				t.Fatal("the retry took no lease on the machine it waited for")
 			}
 			return id
 		}
@@ -141,17 +145,20 @@ func (w *world) bootAndReady(t *testing.T, now time.Time, holder string) firefly
 func TestPlace(t *testing.T) {
 	t.Run("happy/provisions_when_nothing_exists", func(t *testing.T) {
 		w := newWorld(t)
-		id, ok, err := w.p.Place(context.Background(), placement.Request{
+		seat, err := w.p.Place(context.Background(), placement.Request{
 			Holder: "session:one", Kind: firefly.Session, TTL: time.Hour,
 		}, base)
 		if err != nil {
 			t.Fatalf("Place: %v", err)
 		}
-		if ok {
+		if !seat.Pending {
 			t.Fatal("Place reported a ready machine before one was provisioned")
 		}
-		if id == "" {
+		if seat.Machine == "" {
 			t.Fatal("Place returned no machine id for the machine it provisioned")
+		}
+		if seat.Lease != "" {
+			t.Fatalf("Place took lease %s on a machine that is still booting", seat.Lease)
 		}
 		if len(w.specs) != 1 {
 			t.Fatalf("asked for %d specs, want 1", len(w.specs))
@@ -162,12 +169,13 @@ func TestPlace(t *testing.T) {
 		// The name is what the network is asked about, and the script sets the hostname:
 		// two names is a machine nothing can find.
 		w := newWorld(t)
-		id, _, err := w.p.Place(context.Background(), placement.Request{
+		seat, err := w.p.Place(context.Background(), placement.Request{
 			Holder: "session:one", Kind: firefly.Session, TTL: time.Hour,
 		}, base)
 		if err != nil {
 			t.Fatalf("Place: %v", err)
 		}
+		id := seat.Machine
 		if len(w.specs) != 1 {
 			t.Fatalf("asked for %d specs, want 1", len(w.specs))
 		}
@@ -200,17 +208,17 @@ func TestPlace(t *testing.T) {
 		w := newWorld(t)
 		req := placement.Request{Holder: "session:one", Kind: firefly.Session, TTL: time.Hour}
 
-		first, ok, err := w.p.Place(context.Background(), req, base)
-		if err != nil || ok || first == "" {
-			t.Fatalf("first Place = (%q, %v, %v), want a pending machine", first, ok, err)
+		first, err := w.p.Place(context.Background(), req, base)
+		if err != nil || !first.Pending || first.Machine == "" {
+			t.Fatalf("first Place = (%+v, %v), want a pending machine", first, err)
 		}
 		for i := 0; i < 3; i++ {
-			got, ok, err := w.p.Place(context.Background(), req, base.Add(time.Duration(i+1)*time.Second))
-			if err != nil || ok {
-				t.Fatalf("retry %d = (%q, %v, %v), want the pending machine", i, got, ok, err)
+			got, err := w.p.Place(context.Background(), req, base.Add(time.Duration(i+1)*time.Second))
+			if err != nil || !got.Pending {
+				t.Fatalf("retry %d = (%+v, %v), want the pending machine", i, got, err)
 			}
-			if got != first {
-				t.Fatalf("retry %d returned %q, want the machine already booting (%q)", i, got, first)
+			if got.Machine != first.Machine {
+				t.Fatalf("retry %d returned %q, want the machine already booting (%q)", i, got.Machine, first.Machine)
 			}
 		}
 		if len(w.specs) != 1 {
@@ -225,7 +233,7 @@ func TestPlace(t *testing.T) {
 		w.net.MetadataMissing() // a machine that runs and never joins
 
 		req := placement.Request{Holder: "session:one", Kind: firefly.Session, TTL: time.Hour}
-		first, _, err := w.p.Place(context.Background(), req, base)
+		first, err := w.p.Place(context.Background(), req, base)
 		if err != nil {
 			t.Fatalf("Place: %v", err)
 		}
@@ -241,17 +249,17 @@ func TestPlace(t *testing.T) {
 		}
 		var state firefly.State
 		for _, m := range snap.Machines {
-			if m.ID == first {
+			if m.ID == first.Machine {
 				state = m.State
 			}
 		}
 		if state != firefly.Error {
-			t.Fatalf("machine %s is %s, want ERROR so the case is about the failed boot", first, state)
+			t.Fatalf("machine %s is %s, want ERROR so the case is about the failed boot", first.Machine, state)
 		}
 
-		got, ok, err := w.p.Place(context.Background(), req, at)
-		if err != nil || ok || got != first {
-			t.Fatalf("Place after a failed boot = (%q, %v, %v), want the same machine pending", got, ok, err)
+		again, err := w.p.Place(context.Background(), req, at)
+		if err != nil || !again.Pending || again.Machine != first.Machine {
+			t.Fatalf("Place after a failed boot = (%+v, %v), want the same machine pending", again, err)
 		}
 		if len(w.specs) != 1 {
 			t.Fatalf("asked for %d specs, want 1", len(w.specs))
@@ -263,14 +271,17 @@ func TestPlace(t *testing.T) {
 		id := w.bootAndReady(t, base, "session:boot")
 		now := base.Add(11 * time.Minute)
 
-		got, ok, err := w.p.Place(context.Background(), placement.Request{
+		seat, err := w.p.Place(context.Background(), placement.Request{
 			Holder: "session:two", Kind: firefly.Session, TTL: time.Hour,
 		}, now)
 		if err != nil {
 			t.Fatalf("Place: %v", err)
 		}
-		if !ok || got != id {
-			t.Fatalf("Place = (%s, %v), want the ready machine %s", got, ok, id)
+		if seat.Pending || seat.Machine != id {
+			t.Fatalf("Place = (%+v), want a lease on the ready machine %s", seat, id)
+		}
+		if seat.Lease == "" {
+			t.Fatal("Place reused a ready machine without taking a lease on it")
 		}
 		if len(w.specs) != 1 {
 			t.Fatalf("provisioned again (%d specs) when a machine had room", len(w.specs))
@@ -284,25 +295,25 @@ func TestPlace(t *testing.T) {
 		now := base.Add(11 * time.Minute)
 		// One lease is already held by the boot helper, so capacity-1 more fill it.
 		for i := 0; i < w.p.Capacity()-1; i++ {
-			if _, ok, err := w.p.Place(context.Background(), placement.Request{
+			if seat, err := w.p.Place(context.Background(), placement.Request{
 				Holder: "session:" + string(rune('a'+i)), Kind: firefly.Session, TTL: time.Hour,
-			}, now); err != nil || !ok {
-				t.Fatalf("Place %d = (_, %v, %v), want the ready machine", i, ok, err)
+			}, now); err != nil || seat.Pending {
+				t.Fatalf("Place %d = (%+v, %v), want the ready machine", i, seat, err)
 			}
 		}
 
 		// One more than capacity: a second machine, and the caller is told to retry.
-		got, ok, err := w.p.Place(context.Background(), placement.Request{
+		seat, err := w.p.Place(context.Background(), placement.Request{
 			Holder: "session:full", Kind: firefly.Session, TTL: time.Hour,
 		}, now)
 		if err != nil {
 			t.Fatalf("Place: %v", err)
 		}
-		if ok {
+		if !seat.Pending {
 			t.Fatal("Place reused a machine that was at capacity")
 		}
-		if got == "" || len(w.specs) != 2 {
-			t.Fatalf("Place = (%q, %v) with %d specs, want a second machine", got, ok, len(w.specs))
+		if seat.Machine == "" || len(w.specs) != 2 {
+			t.Fatalf("Place = (%+v) with %d specs, want a second machine", seat, len(w.specs))
 		}
 	})
 
@@ -310,7 +321,7 @@ func TestPlace(t *testing.T) {
 		w := newWorld(t, func(c *placement.Config) { c.Capacity = 1; c.MaxMachines = 1 })
 		w.bootAndReady(t, base, "session:boot")
 
-		_, _, err := w.p.Place(context.Background(), placement.Request{
+		_, err := w.p.Place(context.Background(), placement.Request{
 			Holder: "session:two", Kind: firefly.Session, TTL: time.Hour,
 		}, base.Add(11*time.Minute))
 		if !errors.Is(err, placement.ErrAtCapacity) {
@@ -326,7 +337,7 @@ func TestPlace(t *testing.T) {
 
 		// Past MaxLifetime (4h), which is the machine's deadline.
 		now := base.Add(4*time.Hour + time.Minute)
-		_, _, err := w.p.Place(context.Background(), placement.Request{
+		_, err := w.p.Place(context.Background(), placement.Request{
 			Holder: "session:late", Kind: firefly.Session, TTL: time.Hour,
 		}, now)
 		if !errors.Is(err, placement.ErrAtCapacity) {
@@ -347,7 +358,7 @@ func TestPlace(t *testing.T) {
 			}
 		}
 
-		_, _, err := w.p.Place(context.Background(), placement.Request{
+		_, err := w.p.Place(context.Background(), placement.Request{
 			Holder: "session:racing", Kind: firefly.Session, TTL: time.Hour,
 		}, base)
 		if !errors.Is(err, firefly.ErrNameTaken) {
@@ -361,20 +372,20 @@ func TestPlace(t *testing.T) {
 		w := newWorld(t)
 		w.cloud.FailCreate(errors.New("quota exceeded"))
 
-		if _, _, err := w.p.Place(context.Background(), placement.Request{
+		if _, err := w.p.Place(context.Background(), placement.Request{
 			Holder: "session:one", Kind: firefly.Session, TTL: time.Hour,
 		}, base); err == nil {
 			t.Fatal("the first create failure was hidden")
 		}
 
 		// Second attempt, inside the backoff window: pending, not an error.
-		_, ok, err := w.p.Place(context.Background(), placement.Request{
+		seat, err := w.p.Place(context.Background(), placement.Request{
 			Holder: "session:one", Kind: firefly.Session, TTL: time.Hour,
 		}, base.Add(time.Second))
 		if err != nil {
 			t.Fatalf("Place during backoff = %v, want a pending answer", err)
 		}
-		if ok {
+		if !seat.Pending {
 			t.Fatal("Place reported a ready machine during backoff")
 		}
 	})
@@ -390,7 +401,7 @@ func TestPlace(t *testing.T) {
 		for name, req := range cases {
 			t.Run(name, func(t *testing.T) {
 				w := newWorld(t)
-				if _, _, err := w.p.Place(context.Background(), req, base); err == nil {
+				if _, err := w.p.Place(context.Background(), req, base); err == nil {
 					t.Fatalf("Place(%+v) = nil, want a refusal", req)
 				}
 				if len(w.specs) != 0 {
