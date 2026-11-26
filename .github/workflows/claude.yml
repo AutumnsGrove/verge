@@ -10,17 +10,22 @@ on:
   pull_request_review:
     types: [submitted]
 
-# Two mentions in the same conversation are the same piece of work, so the
-# second waits for the first rather than starting beside it. `cancel-in-progress`
-# is off on purpose: a session that is mid-edit is worth more than the head
-# start, and the branch it is changing is the one the next run would read.
-concurrency:
-  group: claude-${{ github.event.issue.number || github.event.pull_request.number }}
-  cancel-in-progress: false
-
 jobs:
   claude:
     timeout-minutes: 45
+    # The group is on the job, not the workflow, because a job whose `if` below
+    # fails never joins it. At workflow level every ordinary comment and review
+    # in the conversation would enter the group, and `queue` defaults to
+    # `single`: a newly queued run *replaces* the pending one, so a mention
+    # waiting for its turn would be discarded by the next unrelated event and
+    # nothing would report it. Here only a run that carries a mention queues.
+    #
+    # `cancel-in-progress` stays off so the second mention waits rather than
+    # killing a session that is mid-edit, and a queued mention is replaced only
+    # by another mention.
+    concurrency:
+      group: claude-${{ github.event.issue.number || github.event.pull_request.number }}
+      cancel-in-progress: false
     if: |
       (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
       (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
@@ -38,6 +43,10 @@ jobs:
         uses: actions/checkout@v7
         with:
           fetch-depth: 1
+          # The action's own git commands get their token from the OIDC app
+          # token, not from `.git/config`, so nothing here needs the workflow
+          # token left behind for a session to find.
+          persist-credentials: false
 
       - name: Run Claude Code
         id: claude
