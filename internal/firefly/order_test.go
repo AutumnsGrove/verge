@@ -31,6 +31,13 @@ import (
 //
 // It is per-history rather than shared, because "no save failed in this history"
 // is a claim about this history.
+//
+// One limit worth naming: synced is what the fake syncer has saved *so far*, not
+// what it saved on this teardown. That is sound because a machine enters SYNCING
+// once and tears down once, so an earlier save for it can only be the save that
+// led here -- and there is no second save for a mutation to skip. The histories
+// also hold one machine each, so a mix-up between machines is not what this
+// catches; the maps are keyed by id and would, if a history ever needed two.
 type ledger struct {
 	synced    map[firefly.MachineID]bool
 	abandoned map[firefly.MachineID]bool
@@ -111,9 +118,13 @@ func (l *ledger) observe(t tb, h *harness, res firefly.Result) {
 // The generator excludes exactly the fault docs/testing.md says to exclude: a
 // save that can never succeed. Transient failures are drawn, because a machine
 // that fails a save twice and succeeds on the third must still be saved before it
-// is destroyed -- and because enough consecutive failures are allowed to abandon
-// it, which the property permits only when the loss is recorded. The permanent
-// case has its own test, below.
+// is destroyed -- and because enough consecutive failures may abandon it, which
+// the property permits only when the loss is recorded.
+//
+// Whether a drawn history happens to abandon a save is up to the draw, so the
+// exception's branch is not asserted from here. It is asserted from the sad/ case
+// below, which is generated too: every save fails there, so the branch is reached
+// on every history whatever the clock does.
 func TestOrderingProperty(t *testing.T) {
 	var deletes, confirmed atomic.Int64
 
@@ -129,8 +140,9 @@ func TestOrderingProperty(t *testing.T) {
 		for i := 0; i < steps; i++ {
 			switch rapid.IntRange(0, 4).Draw(t, "move") {
 			case 0:
-				// A save that fails. Drawing up to SyncAttempts is what makes the
-				// generator able to reach the cap's abandonment at all.
+				// A save that fails. Drawing up to SyncAttempts leaves the generator
+				// able to reach an abandonment on its own, and the ledger will hold the
+				// loop to it if it does: recorded, or the delete is a failure.
 				failures := rapid.IntRange(1, h.f.Config().SyncAttempts).Draw(t, "failures")
 				h.sync.FailNext(failures)
 				l.faults++
@@ -187,40 +199,51 @@ func TestOrderingProperty(t *testing.T) {
 // preceded by an abandonment that was reported to the caller, exactly once, and
 // by no successful save at all. TestAbandonmentIsRecorded in tick_test.go
 // asserts the transition; this asserts what the transition is allowed to excuse.
+//
+// The clock is drawn rather than fixed, so the exception branch of the ledger is
+// exercised over generated histories and not one walk. Abandonment stays certain
+// whatever the draw: every save fails, so the machine cannot reach a delete
+// without the loss being recorded first.
 func TestOrderingAbandonmentIsTheRecordedException(t *testing.T) {
-	h := newHarness(t)
-	id := h.provision(firefly.Ready)
-	h.sync.FailAlways()
+	t.Run("sad/abandonment_excuses_the_delete", func(t *testing.T) {
+		rapid.Check(t, func(t *rapid.T) {
+			h := newHarness(t)
+			id := h.provision(firefly.Ready)
+			h.sync.FailAlways()
 
-	l := newLedger()
-	// FailAlways is a fault, and the ledger's rule is that abandonment is only
-	// legal in a history where a save failed. Being unable to fail differently is
-	// the eventual case of that rule, not an exemption from it.
-	l.faults = 1
+			l := newLedger()
+			// FailAlways is a fault, and the ledger's rule is that abandonment is
+			// only legal in a history where a save failed. Being unable to fail
+			// differently is the eventual case of that rule, not an exemption.
+			l.faults = 1
 
-	now := base
-	for i := 0; i < 120 && len(l.abandoned) == 0; i++ {
-		now = now.Add(time.Minute)
-		l.observe(t, h, h.tick(now))
-	}
+			// Every tick advances time, by at least a minute, so the retry backoff
+			// is always due and the loop cannot spin on a frozen clock.
+			now := base
+			for i := 0; i < 100 && len(l.abandoned) == 0; i++ {
+				now = now.Add(time.Duration(rapid.IntRange(1, 90).Draw(t, "minutes")) * time.Minute)
+				l.observe(t, h, h.tick(now))
+			}
 
-	if len(l.abandoned) != 1 || !l.abandoned[id] {
-		t.Fatalf("abandoned = %v, want exactly [%s]", l.abandoned, id)
-	}
-	if len(l.synced) != 0 {
-		t.Fatalf("the syncer recorded successful saves %v for a save that cannot succeed", l.synced)
-	}
+			if len(l.abandoned) != 1 || !l.abandoned[id] {
+				t.Fatalf("abandoned = %v, want exactly [%s]", l.abandoned, id)
+			}
+			if len(l.synced) != 0 {
+				t.Fatalf("the syncer recorded successful saves %v for a save that cannot succeed", l.synced)
+			}
 
-	// Abandoned on paper is worthless unless the machine actually leaves, so keep
-	// the clock running until the provider's half resolves.
-	for i := 0; i < 120 && l.confirmed == 0; i++ {
-		now = now.Add(time.Minute)
-		l.observe(t, h, h.tick(now))
-	}
-	if l.confirmed != 1 {
-		t.Fatalf("the machine was abandoned but never left: confirmed=%d", l.confirmed)
-	}
-	if l.deletes != 1 {
-		t.Fatalf("deletes = %d, want 1: an abandonment issues exactly one delete", l.deletes)
-	}
+			// Abandoned on paper is worthless unless the machine actually leaves,
+			// so keep the clock running until the provider's half resolves.
+			for i := 0; i < 100 && l.confirmed == 0; i++ {
+				now = now.Add(time.Duration(rapid.IntRange(1, 90).Draw(t, "minutes")) * time.Minute)
+				l.observe(t, h, h.tick(now))
+			}
+			if l.confirmed != 1 {
+				t.Fatalf("the machine was abandoned but never left: confirmed=%d", l.confirmed)
+			}
+			if l.deletes != 1 {
+				t.Fatalf("deletes = %d, want 1: an abandonment issues exactly one delete", l.deletes)
+			}
+		})
+	})
 }
