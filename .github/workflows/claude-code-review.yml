@@ -4,13 +4,20 @@
 # it did not. It has a shell so it can run the gates itself instead of guessing
 # at them, which is the same posture as `pi-review.yml`.
 #
-# The security of a shell on a checkout is in what the run can write, so this
-# job's token is the workflow token, passed explicitly as `github_token`.
-# Without that input the action exchanges its `id-token` OIDC token for a Claude
-# app token carrying `contents: write`, and that would outrank the `permissions`
-# block below; with it, the run can read the tree and post a comment, and
-# nothing else. A checkout can contain a file that tells the reader to run
-# something, so nothing here may be able to write to the repository.
+# Two secrets matter here, and only one of them is about writing.
+#
+# What the run can write is the workflow token, passed explicitly as
+# `github_token`. Without that input the action trades its `id-token` OIDC token
+# for a Claude app token carrying `contents: write`, which would outrank the
+# `permissions` block below; with it, the run can read the tree and post a
+# comment, and cannot touch a branch or a release.
+#
+# What it can read includes `CLAUDE_CODE_OAUTH_TOKEN`, which is in Claude's own
+# environment and therefore within reach of any `make` or `go test` the review
+# runs, on a runner with network. Full bash cannot be narrowed into a promise
+# about that, so the guard is which pull requests reach the job at all: same
+# repository, not a draft, not a bot. That is the same trust `pi-review` extends
+# when it runs `make check` with its API key in the environment.
 name: Claude Code Review
 
 on:
@@ -27,10 +34,19 @@ concurrency:
 
 permissions:
   contents: read
-  # `gh pr comment` posts to the pull request's conversation, which is an issue
-  # comment, so both of these are needed to say anything at all.
+  # `gh pr comment` needs this one, and `issues: write` is not a substitute: the
+  # REST reference accepts either, but the check runs against the resource
+  # rather than the route, so an `issues: write` token gets a 403 on a pull
+  # request's comments endpoint (github/rest-api-description#6994, and the
+  # `X-Accepted-GitHub-Permissions: issues=write; pull_requests=write` header
+  # that 403 comes back with).
+  #
+  # There is no comment-only scope, so this also permits `gh pr review
+  # --approve` and dismissal, and the session holds `GH_TOKEN` with full bash,
+  # so no allow-list closes that. What bounds it is the same trust boundary the
+  # shell rests on: a pull request from this repository, not a draft, not from a
+  # bot, written by someone with push access here.
   pull-requests: write
-  issues: write
 
 jobs:
   claude-review:
@@ -144,11 +160,11 @@ jobs:
 
             **5. The workflow YAML, when the diff changes it.** A `permissions:`
             block that grants more than the job uses, or a write scope with no
-            comment saying why. An action tag that floats. A `paths` filter that
-            skips a required check. A `concurrency` group that does not cancel
-            where two runs would answer the same commit. A red `static`, `test`
-            or `vuln` check on the head is a finding even when the diff did not
-            cause it.
+            comment saying why. A tool version that floats where `go.yml` pins
+            one. A `paths` filter that skips a required check. A `concurrency`
+            group that does not cancel where two runs would answer the same
+            commit. A red `static`, `test` or `vuln` check on the head is a
+            finding even when the diff did not cause it.
 
             ## What not to flag
 
