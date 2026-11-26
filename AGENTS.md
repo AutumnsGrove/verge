@@ -25,3 +25,18 @@ Read the `review / review` row and act on the state it reports:
 A green `review / review` tick means a review was posted — the job exits non-zero when it cannot post — so
 read the review rather than trusting the tick. A red check from CI is the one exception to all of the
 above: fix it and push.
+
+## The second reader
+
+`claude-review` is the other reviewer. It has a shell, so it installs the tools `go.yml` pins, runs
+`make check` and `make vuln` on the head itself, and posts one comment rather than inline threads. Its
+check is the **`claude-review`** row.
+
+It cannot push. Its token is the workflow's own, `contents: read`, passed explicitly so the action never
+trades its `id-token` for an app token that could; a finding it raises is a comment to answer, never a
+commit it made. It also skips a draft, a fork, and a bot-authored pull request, so an absent row there is
+the normal state rather than a failure.
+
+The wait rule above is about `review / review`, and the reason behind it is the same here: both jobs
+cancel their own superseded run, so a push cancels whoever is still reading. Push once, with every
+finding from both.
