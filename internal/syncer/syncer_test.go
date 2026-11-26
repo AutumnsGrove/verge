@@ -28,10 +28,12 @@ type fetcher struct {
 	silent  bool // the stream blocks until the context is done
 	started chan struct{}
 	calls   []firefly.MachineID
+	names   []string
 }
 
-func (f *fetcher) Fetch(ctx context.Context, id firefly.MachineID) (io.ReadCloser, error) {
+func (f *fetcher) Fetch(ctx context.Context, id firefly.MachineID, name string) (io.ReadCloser, error) {
 	f.calls = append(f.calls, id)
+	f.names = append(f.names, name)
 	if f.started != nil {
 		close(f.started)
 	}
@@ -120,7 +122,7 @@ func TestSync(t *testing.T) {
 		s := &sink{}
 		sy := newSyncer(t, f, s)
 
-		if err := sy.Sync(context.Background(), "fake-001"); err != nil {
+		if err := sy.Sync(context.Background(), "fake-001", "verge-machine-1"); err != nil {
 			t.Fatalf("Sync: %v", err)
 		}
 
@@ -136,6 +138,11 @@ func TestSync(t *testing.T) {
 		if got := s.puts[0].size; got != int64(len(f.body)) {
 			t.Fatalf("size = %d, want %d", got, len(f.body))
 		}
+		// The transport is handed the network name, not the provider id: the tailnet
+		// cannot be asked about an id.
+		if len(f.names) != 1 || f.names[0] != "verge-machine-1" {
+			t.Fatalf("the fetcher was told %v, want [verge-machine-1]", f.names)
+		}
 	})
 
 	t.Run("happy/nothing_to_save_is_not_a_failure", func(t *testing.T) {
@@ -145,7 +152,7 @@ func TestSync(t *testing.T) {
 		s := &sink{}
 		sy := newSyncer(t, f, s)
 
-		if err := sy.Sync(context.Background(), "fake-001"); err != nil {
+		if err := sy.Sync(context.Background(), "fake-001", "verge-machine-1"); err != nil {
 			t.Fatalf("Sync: %v", err)
 		}
 		if len(s.puts) != 0 {
@@ -164,7 +171,7 @@ func TestSync(t *testing.T) {
 		s := &sink{}
 		sy := newSyncer(t, f, s)
 
-		if err := sy.Sync(context.Background(), "fake-001"); err != nil {
+		if err := sy.Sync(context.Background(), "fake-001", "verge-machine-1"); err != nil {
 			t.Fatalf("Sync: %v", err)
 		}
 
@@ -185,7 +192,7 @@ func TestSync(t *testing.T) {
 		s := &sink{}
 		sy := newSyncer(t, f, s)
 
-		err := sy.Sync(context.Background(), "fake-001")
+		err := sy.Sync(context.Background(), "fake-001", "verge-machine-1")
 		if !errors.Is(err, gone) {
 			t.Fatalf("Sync = %v, want it to wrap %v", err, gone)
 		}
@@ -200,7 +207,7 @@ func TestSync(t *testing.T) {
 		s := &sink{err: refused}
 		sy := newSyncer(t, f, s)
 
-		err := sy.Sync(context.Background(), "fake-001")
+		err := sy.Sync(context.Background(), "fake-001", "verge-machine-1")
 		if !errors.Is(err, refused) {
 			t.Fatalf("Sync = %v, want it to wrap %v", err, refused)
 		}
@@ -215,7 +222,7 @@ func TestSync(t *testing.T) {
 		if err != nil {
 			t.Fatalf("New: %v", err)
 		}
-		if err := sy.Sync(context.Background(), "fake-001"); err != nil {
+		if err := sy.Sync(context.Background(), "fake-001", "verge-machine-1"); err != nil {
 			t.Fatalf("Sync at exactly the cap: %v", err)
 		}
 		if len(s.puts) != 1 || s.puts[0].size != 1024 {
@@ -233,7 +240,7 @@ func TestSync(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 
-		if err := sy.Sync(ctx, "fake-001"); !errors.Is(err, context.Canceled) {
+		if err := sy.Sync(ctx, "fake-001", "verge-machine-1"); !errors.Is(err, context.Canceled) {
 			t.Fatalf("Sync = %v, want %v", err, context.Canceled)
 		}
 		if len(f.calls) != 0 {
@@ -255,7 +262,7 @@ func TestSync(t *testing.T) {
 		s := &sink{}
 		sy := newSyncer(t, f, s)
 
-		err := sy.Sync(ctx, "fake-001")
+		err := sy.Sync(ctx, "fake-001", "verge-machine-1")
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("Sync = %v, want %v", err, context.Canceled)
 		}
@@ -285,7 +292,7 @@ func TestSync(t *testing.T) {
 		defer cancel()
 
 		done := make(chan error, 1)
-		go func() { done <- sy.Sync(ctx, "fake-001") }()
+		go func() { done <- sy.Sync(ctx, "fake-001", "verge-machine-1") }()
 
 		<-started
 		cancel()
@@ -315,7 +322,7 @@ func TestSync(t *testing.T) {
 		s := &sink{}
 		sy := newSyncer(t, f, s)
 
-		err := sy.Sync(context.Background(), "fake-001")
+		err := sy.Sync(context.Background(), "fake-001", "verge-machine-1")
 		if !errors.Is(err, boom) {
 			t.Fatalf("Sync = %v, want it to wrap %v", err, boom)
 		}
@@ -342,7 +349,7 @@ func TestSync(t *testing.T) {
 			t.Fatalf("New: %v", err)
 		}
 
-		err = sy.Sync(context.Background(), "fake-001")
+		err = sy.Sync(context.Background(), "fake-001", "verge-machine-1")
 		if !errors.Is(err, syncer.ErrWorkspaceTooLarge) {
 			t.Fatalf("Sync = %v, want %v", err, syncer.ErrWorkspaceTooLarge)
 		}
@@ -360,7 +367,7 @@ func TestSync(t *testing.T) {
 			s := &sink{}
 			sy := newSyncer(t, f, s)
 
-			if err := sy.Sync(context.Background(), id); err == nil {
+			if err := sy.Sync(context.Background(), id, "verge-machine-1"); err == nil {
 				t.Fatalf("Sync(%q) = nil, want a refusal", id)
 			}
 			if len(s.puts) != 0 {
@@ -406,7 +413,7 @@ func TestNew(t *testing.T) {
 		if err != nil {
 			t.Fatalf("New: %v", err)
 		}
-		if err := sy.Sync(context.Background(), "fake-001"); err != nil {
+		if err := sy.Sync(context.Background(), "fake-001", "verge-machine-1"); err != nil {
 			t.Fatalf("Sync: %v", err)
 		}
 		if got, want := s.puts[0].key, "state/fake-001.tar"; got != want {
@@ -446,7 +453,7 @@ func TestKeyIsStable(t *testing.T) {
 				t.Fatalf("New(%q): %v", prefix, err)
 			}
 			for i := 0; i < 2; i++ {
-				if err := sy.Sync(context.Background(), "fake-001"); err != nil {
+				if err := sy.Sync(context.Background(), "fake-001", "verge-machine-1"); err != nil {
 					t.Fatalf("Sync: %v", err)
 				}
 			}

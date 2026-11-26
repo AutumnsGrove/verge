@@ -558,7 +558,9 @@ type Cloud interface {
 // uncommitted patch. Not the document: that is Store, and losing it costs a
 // reconcile rather than an afternoon.
 type Syncer interface {
-    Sync(ctx context.Context, id MachineID) error
+    // The name is passed because a transport needs it and nothing else has it:
+    // the tailnet is keyed on the name, not the provider's id.
+    Sync(ctx context.Context, id MachineID, name string) error
 }
 
 type Network interface {

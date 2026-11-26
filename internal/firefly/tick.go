@@ -319,7 +319,7 @@ func (f *Firefly) step(ctx context.Context, doc *Document, m *Machine, now time.
 		if !m.ReachedReady {
 			return f.beginTeardown(ctx, m, Synced, now)
 		}
-		if err := f.cfg.Syncer.Sync(ctx, m.ID); err != nil {
+		if err := f.cfg.Syncer.Sync(ctx, m.ID, m.Name); err != nil {
 			// The cap can abandon a save, but only after the attempts are spent --
 			// and it says so, because this is data loss.
 			if m.Failures+1 >= f.cfg.SyncAttempts {

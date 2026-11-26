@@ -77,7 +77,7 @@ var (
 // of the contract rather than an assumption because the failure it prevents is a
 // shutdown that waits for a machine that has already stopped answering.
 type Fetcher interface {
-	Fetch(ctx context.Context, id firefly.MachineID) (io.ReadCloser, error)
+	Fetch(ctx context.Context, id firefly.MachineID, name string) (io.ReadCloser, error)
 }
 
 // Sink stores one object.
@@ -163,7 +163,7 @@ func New(cfg Config) (*Syncer, error) {
 // The order is deliberate: fetch, spool, store. A store is never attempted for a
 // workspace that could not be fetched or does not fit, so a failed save cannot
 // leave an empty object where the last good copy was.
-func (s *Syncer) Sync(ctx context.Context, id firefly.MachineID) error {
+func (s *Syncer) Sync(ctx context.Context, id firefly.MachineID, name string) error {
 	if !validElem(string(id)) {
 		return fmt.Errorf("%w: %q", ErrBadMachineID, id)
 	}
@@ -171,7 +171,7 @@ func (s *Syncer) Sync(ctx context.Context, id firefly.MachineID) error {
 		return err
 	}
 
-	rc, err := s.fetch.Fetch(ctx, id)
+	rc, err := s.fetch.Fetch(ctx, id, name)
 	if err != nil {
 		return fmt.Errorf("syncer: fetching %s: %w", id, err)
 	}

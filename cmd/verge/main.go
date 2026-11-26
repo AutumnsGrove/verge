@@ -162,9 +162,9 @@ type noTransport struct{}
 // ErrNoTransport means the workspace transport does not exist yet.
 var ErrNoTransport = errors.New("verge: the machine-side workspace transport is not implemented")
 
-func (noTransport) Fetch(ctx context.Context, id firefly.MachineID) (io.ReadCloser, error) {
+func (noTransport) Fetch(ctx context.Context, id firefly.MachineID, name string) (io.ReadCloser, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return nil, fmt.Errorf("%w: cannot fetch the workspace of %s", ErrNoTransport, id)
+	return nil, fmt.Errorf("%w: cannot fetch the workspace of %s (%s)", ErrNoTransport, id, name)
 }

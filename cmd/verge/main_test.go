@@ -85,12 +85,12 @@ func TestWorkspacePrefix(t *testing.T) {
 // "we could not ask", which is the distinction that decides whether a machine is
 // destroyed.
 func TestNoTransportIsAnError(t *testing.T) {
-	_, err := noTransport{}.Fetch(t.Context(), "fake-001")
+	_, err := noTransport{}.Fetch(t.Context(), "fake-001", "verge-machine-1")
 	if !errors.Is(err, ErrNoTransport) {
 		t.Fatalf("Fetch = %v, want %v", err, ErrNoTransport)
 	}
-	if !strings.Contains(err.Error(), "fake-001") {
-		t.Fatalf("Fetch = %v, want it to name the machine", err)
+	if !strings.Contains(err.Error(), "fake-001") || !strings.Contains(err.Error(), "verge-machine-1") {
+		t.Fatalf("Fetch = %v, want it to name the machine by id and by host", err)
 	}
 }
 

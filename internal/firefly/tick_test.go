@@ -199,6 +199,16 @@ func TestLifecycleEndToEnd(t *testing.T) {
 	if got := h.sync.Synced(); len(got) != 1 || got[0] != id {
 		t.Fatalf("synced = %v, want [%s]", got, id)
 	}
+	// The name goes to the transport because the network is keyed on it: a save
+	// against the provider's id instead of the machine's name is a save against a
+	// host that does not exist.
+	wantName, ok := h.cloud.Name(id)
+	if !ok {
+		t.Fatalf("the fake has no name for %s", id)
+	}
+	if got := h.sync.Saved(); len(got) != 1 || got[0].Name != wantName {
+		t.Fatalf("the save was told name %q, want %q", got[0].Name, wantName)
+	}
 
 	// The provider reaps it; the node lingers, so the tick after confirms.
 	h.cloud.Advance(time.Minute)

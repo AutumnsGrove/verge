@@ -676,7 +676,7 @@ func (stubNetwork) Forget(context.Context, string) error             { return ni
 
 type stubSyncer struct{}
 
-func (stubSyncer) Sync(context.Context, MachineID) error { return nil }
+func (stubSyncer) Sync(context.Context, MachineID, string) error { return nil }
 
 // TestRetryDelayIsCapped covers the curve and its ceiling directly: the cap is the
 // part that matters, because it is what stops a retry from being scheduled after
