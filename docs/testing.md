@@ -55,6 +55,10 @@ internal/
   loop/
     loop.go                   the daemon's loop: immediate pass, interval, graceful stop
     loop_test.go              the injected wait, a failed pass, a pass in flight
+  placement/
+    placement.go              the policy: which machine, how many sessions, the cap
+    placement_test.go         provisioning, cheap retries, capacity, the deadline,
+                              and the lease in the answer
   cloudinit/
     render.go                 the boot script: name, mesh address, enrolment key
     render_test.go            the document as a whole, and hostile values
@@ -83,6 +87,11 @@ internal/
     relay.go                  the pi JSONL reader and writer
     relay_test.go
     relay_fuzz_test.go        FuzzRelay — the highest-value target
+  session/
+    session.go                place, run, relay, renew, release: one pi session's
+                              control-plane half
+    session_test.go           pending, both directions, renewal, a lapse, a failed
+                              start, an orderly close, a cancelled caller
   proxy/
     stream.go
     stream_test.go
@@ -96,6 +105,7 @@ e2e/
 docs/
   testing.md                  this file
   firefly.md                  the mechanism/policy boundary
+  session.md                  the session data path and its judgement calls
 ```
 
 `go test ./...` must finish in seconds, never touch the network, and never sleep. The slow tiers
@@ -319,6 +329,7 @@ Committed `bad/` cases:
 | relay | `U+2028` and `U+2029` inside a JSON string are not record boundaries |
 | relay | a frame split mid-UTF-8 rune |
 | relay | a line over the record limit is refused rather than accumulated |
+| session | a session id that would be a path element or a flag is refused |
 | patch | a diff header escaping the working directory is refused |
 | template | a repo URL containing a newline, quote, or `$` never escapes its YAML block |
 | attention | an extension entry claiming a state outside the enum is rejected |

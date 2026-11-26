@@ -12,8 +12,10 @@ registry, both boundary interfaces including the syncer, the reconcile loop (`Ti
 `Provision` are implemented in `internal/firefly`, with a fake for each outside world. All three real
 boundaries exist and are tested against `httptest`, and none has run against its API: Hetzner
 (`internal/cloud/hetzner`), the tailnet (`internal/net/tailnet`), and R2 (`internal/store/r2`). The
-boot script is rendered too (`internal/cloudinit`), so a machine can now be told what it needs to know;
-nothing yet calls any of it on a timer, because there is no `main`.
+boot script is rendered too (`internal/cloudinit`), so a machine can be told what it needs to know, and
+`cmd/verge` reconciles on a timer. The caller above the mechanism is `internal/placement` (which machine,
+how many sessions, the cap) and `internal/session` (one pi session, held by a lease); see
+`docs/session.md`.
 
 `Network` is keyed on the machine's name, `Machine` records that name, and `Provision` mints it; see
 "What a node is called" for the decision and `internal/firefly/name.go` for the shape. `docs/testing.md`
