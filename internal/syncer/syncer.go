@@ -213,11 +213,11 @@ func (s *Syncer) Sync(ctx context.Context, id firefly.MachineID) error {
 // validElem reports whether s can be one element of an object key.
 //
 // A key is not a path, but the two are close enough that a provider-chosen value
-// containing a separator, a dot-dot, or a leading dot is a value that lands
-// somewhere nobody chose. The id is minted by this repository ("fake-001",
-// "fsn1-12345678"), so the narrow set costs nothing real.
+// containing a separator or a dot-dot segment is a value that lands somewhere
+// nobody chose. A leading dot is refused too: it is how a hidden file is spelled,
+// and no machine this repository mints is named that way.
 func validElem(s string) bool {
-	if s == "" || s == "." || s == ".." {
+	if s == "" || s == "." || s == ".." || strings.HasPrefix(s, ".") {
 		return false
 	}
 	for _, r := range s {

@@ -89,7 +89,7 @@ func TestWorkspacePut(t *testing.T) {
 			t.Fatalf("content type = %q, want application/x-tar", got[0].contentType)
 		}
 		if want := strconv.Itoa(len(body)); got[0].length != want {
-			t.Fatalf("content length = %q, want %s: an object of unknown length is one the provider may not accept", got[0].length, want)
+			t.Fatalf("content length = %q, want %s", got[0].length, want)
 		}
 	})
 
@@ -122,6 +122,20 @@ func TestWorkspacePut(t *testing.T) {
 		}
 	})
 
+	t.Run("bad/size_disagrees_with_the_body", func(t *testing.T) {
+		// The size is the caller's statement about the workspace, and it is what the
+		// request is built from. A body that disagrees with it is refused instead of
+		// being stored at whichever of the two lengths happened to win -- and that is
+		// what makes the ContentLength line load-bearing rather than decorative.
+		var got []received
+		ws := newWorkspace(t, &got, http.StatusOK)
+
+		err := ws.Put(context.Background(), "state/fake-001.tar", bytes.NewReader(make([]byte, 10)), 7)
+		if err == nil {
+			t.Fatal("Put with a size that disagrees with the body = nil, want an error")
+		}
+	})
+
 	t.Run("bad/empty_key", func(t *testing.T) {
 		var got []received
 		ws := newWorkspace(t, &got, http.StatusOK)
@@ -133,6 +147,21 @@ func TestWorkspacePut(t *testing.T) {
 			t.Fatalf("the bucket saw %d requests for an empty key, want 0", len(got))
 		}
 	})
+}
+
+// TestUsableKey covers every branch of the second gate, one case each: the guard
+// is only worth having if a deleted branch is a failing test.
+func TestUsableKey(t *testing.T) {
+	for _, key := range []string{"state/fake-001.tar", "verge/prod/x.tar", "a.b-c_d", "a/b/c"} {
+		if !usableKey(key) {
+			t.Fatalf("usableKey(%q) = false, want true", key)
+		}
+	}
+	for _, key := range []string{"", "/x", "a/../b", "a//b", `a\b`, "state/./x", "..", "a/", "."} {
+		if usableKey(key) {
+			t.Fatalf("usableKey(%q) = true, want false", key)
+		}
+	}
 }
 
 func pathOf(got []received, i int) string {

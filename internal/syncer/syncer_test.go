@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"testing/iotest"
 
 	"github.com/AutumnsGrove/verge/internal/firefly"
 	"github.com/AutumnsGrove/verge/internal/syncer"
@@ -20,15 +21,19 @@ import (
 
 // fetcher is the transport boundary: it hands back whatever the machine sent.
 type fetcher struct {
-	body  []byte
-	err   error
-	calls []firefly.MachineID
+	body   []byte
+	reader io.ReadCloser // used instead of body when set, to fail mid-stream
+	err    error
+	calls  []firefly.MachineID
 }
 
 func (f *fetcher) Fetch(ctx context.Context, id firefly.MachineID) (io.ReadCloser, error) {
 	f.calls = append(f.calls, id)
 	if f.err != nil {
 		return nil, f.err
+	}
+	if f.reader != nil {
+		return f.reader, nil
 	}
 	return io.NopCloser(bytes.NewReader(f.body)), nil
 }
@@ -159,6 +164,68 @@ func TestSync(t *testing.T) {
 		}
 	})
 
+	t.Run("happy/exactly_the_cap_is_stored", func(t *testing.T) {
+		// The cap is an inclusive limit. A boundary with only an over-cap test is a
+		// boundary that >= would satisfy, so the exact size is stored.
+		f := &fetcher{body: bytes.Repeat([]byte("x"), 1024)}
+		s := &sink{}
+		sy, err := syncer.New(syncer.Config{Fetcher: f, Sink: s, Prefix: "state", MaxBytes: 1024})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		if err := sy.Sync(context.Background(), "fake-001"); err != nil {
+			t.Fatalf("Sync at exactly the cap: %v", err)
+		}
+		if len(s.puts) != 1 || s.puts[0].size != 1024 {
+			t.Fatalf("stored %d objects, want 1 of 1024 bytes", len(s.puts))
+		}
+	})
+
+	t.Run("sad/context_is_already_done", func(t *testing.T) {
+		// A save that starts after the shutdown signal is a save nobody wants: the
+		// machine is about to be destroyed and the process is about to exit.
+		f := &fetcher{body: []byte("a tarball, honestly")}
+		s := &sink{}
+		sy := newSyncer(t, f, s)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		if err := sy.Sync(ctx, "fake-001"); !errors.Is(err, context.Canceled) {
+			t.Fatalf("Sync = %v, want %v", err, context.Canceled)
+		}
+		if len(f.calls) != 0 {
+			t.Fatalf("the fetcher was asked %d times after the context was cancelled, want 0", len(f.calls))
+		}
+	})
+
+	t.Run("sad/stream_fails_mid_copy", func(t *testing.T) {
+		// A half-spooled workspace must not reach the sink: a truncated tarball is
+		// indistinguishable from a complete one to whoever restores it.
+		dir := t.TempDir()
+		t.Setenv("TMPDIR", dir)
+
+		boom := errors.New("the machine hung up")
+		f := &fetcher{reader: io.NopCloser(io.MultiReader(strings.NewReader("half a tarball"), iotest.ErrReader(boom)))}
+		s := &sink{}
+		sy := newSyncer(t, f, s)
+
+		err := sy.Sync(context.Background(), "fake-001")
+		if !errors.Is(err, boom) {
+			t.Fatalf("Sync = %v, want it to wrap %v", err, boom)
+		}
+		if len(s.puts) != 0 {
+			t.Fatalf("stored %d objects from a failed stream, want 0", len(s.puts))
+		}
+		ents, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatalf("ReadDir: %v", err)
+		}
+		if len(ents) != 0 {
+			t.Fatalf("left %d files behind after a failed stream: %v", len(ents), ents)
+		}
+	})
+
 	t.Run("sad/workspace_is_over_the_cap", func(t *testing.T) {
 		// An unbounded copy from a source this process does not control is how a
 		// machine fills the control plane's disk. The body is refused, not stored.
@@ -183,7 +250,7 @@ func TestSync(t *testing.T) {
 		// The id comes from the provider, and it lands in an object key. A key is
 		// not a path, but a store that treats it as one would put one machine's
 		// workspace where another's belongs.
-		for _, id := range []firefly.MachineID{"", "../elsewhere", "a/b", "..", "fake 001"} {
+		for _, id := range []firefly.MachineID{"", "../elsewhere", "a/b", "..", "fake 001", ".hidden", "..."} {
 			f := &fetcher{body: []byte("a tarball, honestly")}
 			s := &sink{}
 			sy := newSyncer(t, f, s)

@@ -65,9 +65,11 @@ func (w *Workspace) Put(ctx context.Context, key string, body io.ReadSeeker, siz
 		return fmt.Errorf("%w: %q", ErrWorkspaceKey, key)
 	}
 
-	// ContentLength is set from size rather than discovered from the body: the body
-	// is seekable, so the SDK can retry it, but an object whose length the sender
-	// guessed is one the provider may store truncated.
+	// ContentLength is the caller's size -- the number it spooled -- rather than a
+	// length inferred from the body. The body is seekable, so the SDK could infer
+	// one; setting it makes the sink's statement about the workspace the one the
+	// request is built from, and net/http refuses a request whose body disagrees
+	// with it rather than storing a truncated tarball that looks saved.
 	_, err := w.api.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:        aws.String(w.bucket),
 		Key:           aws.String(key),
@@ -89,7 +91,7 @@ func (w *Workspace) Put(ctx context.Context, key string, body io.ReadSeeker, siz
 // a leading slash is a different object in some tools, an empty key is the bucket
 // list, and a dot-dot segment is the shape a path-escape takes.
 func usableKey(key string) bool {
-	if key == "" || strings.HasPrefix(key, "/") {
+	if key == "" {
 		return false
 	}
 	for _, elem := range strings.Split(key, "/") {
