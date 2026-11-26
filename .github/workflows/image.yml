@@ -118,10 +118,16 @@ jobs:
           ls -lh base.img image.qcow2 verge-image.qcow2.zst
           sha256sum verge-image.qcow2.zst > verge-image.qcow2.zst.sha256
 
+      # The artifact name comes from the ref, and a branch ref contains slashes, which an
+      # artifact name cannot: sanitised rather than templated, so a branch and a tag both
+      # produce a name rather than one of them failing after a twenty-minute build.
+      - name: Name the artifact
+        run: echo "IMAGE_ARTIFACT=verge-image-${GITHUB_REF_NAME//\//-}" >> "$GITHUB_ENV"
+
       # The artifact is the image. It is not a release asset and never enters the tree.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
-          name: verge-image-${{ github.ref_name }}
+          name: ${{ env.IMAGE_ARTIFACT }}
           path: |
             verge-image.qcow2.zst
             verge-image.qcow2.zst.sha256
