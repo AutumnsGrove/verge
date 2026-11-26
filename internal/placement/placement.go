@@ -141,9 +141,6 @@ func New(cfg Config) (*Placement, error) {
 }
 
 // Capacity and MaxMachines report the effective policy, for a caller that reports it.
-// Capacity and MaxMachines report the effective policy, for a caller that reports it.
-//
-// Place is not safe for concurrent use; see the package doc.
 func (p *Placement) Capacity() int    { return p.capacity }
 func (p *Placement) MaxMachines() int { return p.maxMachines }
 
@@ -162,11 +159,21 @@ func booting(m firefly.MachineStatus) bool {
 
 // Place puts a lease on a machine, or starts one, or says why it cannot.
 //
+// It is not safe for concurrent use: it reads a snapshot, decides, then acts, so two
+// callers can both take the last seat on a machine, or both provision during one boot. The
+// daemon calls it from one goroutine; see the package doc for where a second caller would
+// have to serialise.
+//
 // The three answers are deliberately different calls to action:
 //
 //   - (id, true, nil): the lease is held on id, and work can start now.
 //   - (id, false, nil): no machine had room, so one is provisioning; the caller retries.
-//     It is not an error -- a boot is minutes.
+//     It is not an error -- a boot is minutes. Every caller waiting during one boot is
+//     told the same machine, including more callers than it has seats for: the seats are
+//     handed out when the machine is READY, so the surplus callers keep waiting and the
+//     next one past capacity provisions. A boot is not a reservation, and pretending it
+//     is would mean either over-provisioning during every boot or counting demand the
+//     snapshot does not carry.
 //   - ("", false, err): nothing will change until a session ends (ErrAtCapacity), or
 //     something went wrong.
 func (p *Placement) Place(ctx context.Context, req Request, now time.Time) (firefly.MachineID, bool, error) {
