@@ -1,0 +1,67 @@
+//go:build contract
+
+package tailnet_test
+
+import (
+	"context"
+	"os"
+	"testing"
+	"time"
+
+	"github.com/AutumnsGrove/verge/internal/net/tailnet"
+)
+
+// The real tailnet, asked about a name that is not in it. Read-only by
+// construction: Joined, NodeExists and the lookup behind them issue GETs, and Forget
+// is deliberately not called here -- a contract test that removed a device would be
+// a test that can break a live tailnet when the name is wrong.
+//
+// A missing credential skips with a stated reason (docs/testing.md).
+
+// client builds the real client, or skips and says what is missing. VERGE_TAILNET_NAME
+// is optional and its absence is stated rather than silent: the client falls back to
+// the token's default tailnet, and "which tailnet did that ask" is the first question
+// a surprising pass or fail raises.
+func client(t *testing.T) *tailnet.Client {
+	t.Helper()
+	tok := os.Getenv("VERGE_TAILNET_TOKEN")
+	if tok == "" {
+		t.Skip("contract: VERGE_TAILNET_TOKEN is not set, so there is no tailnet to ask")
+	}
+	name := os.Getenv("VERGE_TAILNET_NAME")
+	if name == "" {
+		t.Logf("contract: VERGE_TAILNET_NAME is not set, so this asks the token's default tailnet")
+	}
+	return tailnet.New(tok, tailnet.WithTailnet(name))
+}
+
+// TestContractNodeDoesNotExist is the absent half of what this client reports, from
+// the real API rather than from httptest: a name that is not in the tailnet is not a
+// node, and is therefore not joined.
+//
+// It proves the request, the auth, and the not-found path. It does not prove the
+// device decoder -- a client reading the wrong field would also find no device -- and
+// that needs a device the test can be sure exists, which means one this test created
+// or one the maintainer pins by name. Both are decisions rather than tests.
+func TestContractNodeDoesNotExist(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	const absent = "verge-contract-probe-does-not-exist"
+
+	exists, err := client(t).NodeExists(ctx, absent)
+	if err != nil {
+		t.Fatalf("NodeExists against the real API: %v", err)
+	}
+	if exists {
+		t.Fatalf("NodeExists(%q) = true: the contract tailnet has a device with that name", absent)
+	}
+
+	joined, err := client(t).Joined(ctx, absent)
+	if err != nil {
+		t.Fatalf("Joined against the real API: %v", err)
+	}
+	if joined {
+		t.Fatalf("Joined(%q) = true for a name with no device", absent)
+	}
+}

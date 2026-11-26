@@ -1,7 +1,7 @@
 # The targets docs/testing.md names. The fast ones are offline; the tier that
 # needs a vulnerability database is separate, because it is the one target here
 # that cannot be run with the network switched off.
-.PHONY: all vet vuln test race check e2e
+.PHONY: all vet vuln test race check contract e2e
 
 all: check
 
@@ -36,8 +36,15 @@ race:
 # network unplugged.
 check: vet race
 
-# The slow tiers. Both need real infrastructure and are skipped, loudly,
-# when it is absent rather than failing.
-e2e:
+# The tier that needs real infrastructure: a Hetzner project, an R2 bucket and a
+# tailnet key. Every test in it skips with a stated reason when its credential is
+# absent, so this is safe to run without any of them -- and a fork's red X stays a
+# skip.
+contract:
 	go test -tags contract ./...
+
+# The full tier: the contract tests, plus the directory that will hold a real
+# session. That directory is not written yet, so the second line fails rather than
+# pretending: a target that quietly did nothing would be worse.
+e2e: contract
 	go test -tags e2e ./e2e
