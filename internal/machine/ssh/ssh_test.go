@@ -14,8 +14,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AutumnsGrove/verge/internal/syncer/ssh"
+	"github.com/AutumnsGrove/verge/internal/machine/ssh"
+	"github.com/AutumnsGrove/verge/internal/syncer"
 )
+
+// The save half of this package is firefly's Syncer transport, and the assertion lives
+// here so a signature drift is a compile error rather than a save that stops happening.
+var _ syncer.Fetcher = (*ssh.Client)(nil)
 
 // script writes an executable stand-in for ssh and returns its path.
 func script(t *testing.T, body string) string {
@@ -28,7 +33,7 @@ func script(t *testing.T, body string) string {
 	return path
 }
 
-func fetcher(t *testing.T, binary string, opts ...func(*ssh.Config)) *ssh.Fetcher {
+func client(t *testing.T, binary string, opts ...func(*ssh.Config)) *ssh.Client {
 	t.Helper()
 	cfg := ssh.Config{Binary: binary}
 	for _, o := range opts {
@@ -43,7 +48,7 @@ func fetcher(t *testing.T, binary string, opts ...func(*ssh.Config)) *ssh.Fetche
 
 func TestFetch(t *testing.T) {
 	t.Run("happy/the_command_output_is_the_stream", func(t *testing.T) {
-		f := fetcher(t, script(t, `printf 'a tarball, honestly'`))
+		f := client(t, script(t, `printf 'a tarball, honestly'`))
 
 		rc, err := f.Fetch(context.Background(), "fake-001", "verge-machine-1")
 		if err != nil {
@@ -65,7 +70,7 @@ func TestFetch(t *testing.T) {
 		// verge-join: a transport that guessed a different path would fail on every
 		// save with "command not found" and look like a broken machine.
 		out := filepath.Join(t.TempDir(), "args")
-		f := fetcher(t, script(t, `printf '%s\n' "$@" > `+out))
+		f := client(t, script(t, `printf '%s\n' "$@" > `+out))
 
 		rc, err := f.Fetch(context.Background(), "fake-001", "verge-machine-1")
 		if err != nil {
@@ -90,7 +95,7 @@ func TestFetch(t *testing.T) {
 
 	t.Run("happy/extra_arguments_come_before_the_destination", func(t *testing.T) {
 		out := filepath.Join(t.TempDir(), "args")
-		f := fetcher(t, script(t, `printf '%s\n' "$@" > `+out), func(c *ssh.Config) {
+		f := client(t, script(t, `printf '%s\n' "$@" > `+out), func(c *ssh.Config) {
 			c.Args = []string{"-o", "StrictHostKeyChecking=accept-new"}
 			c.User = "runner"
 			c.Command = "/opt/verge/save"
@@ -127,7 +132,7 @@ func TestFetch(t *testing.T) {
 		// The important half: partial output followed by a non-zero exit must be an
 		// error, not EOF. An EOF would look like a finished tarball, and firefly
 		// would destroy the machine believing the workspace was saved.
-		f := fetcher(t, script(t, `printf 'half a tar'; echo 'the disk is full' >&2; exit 3`))
+		f := client(t, script(t, `printf 'half a tar'; echo 'the disk is full' >&2; exit 3`))
 
 		rc, err := f.Fetch(context.Background(), "fake-001", "verge-machine-1")
 		if err != nil {
@@ -148,7 +153,7 @@ func TestFetch(t *testing.T) {
 		// The Fetcher contract says the reader unblocks when the context ends, and
 		// this is where that promise is kept: CommandContext kills the process, and
 		// the read returns instead of waiting for a machine that has stopped talking.
-		f := fetcher(t, script(t, `sleep 30`))
+		f := client(t, script(t, `sleep 30`))
 
 		ctx, cancel := context.WithCancel(context.Background())
 		rc, err := f.Fetch(ctx, "fake-001", "verge-machine-1")
@@ -178,7 +183,7 @@ func TestFetch(t *testing.T) {
 		// Closing the reader is how a caller gives up on a machine that is not
 		// answering, so Read and Close are allowed to be on different goroutines.
 		// Under -race this is the case that fails if the bookkeeping is unguarded.
-		f := fetcher(t, script(t, `sleep 30`))
+		f := client(t, script(t, `sleep 30`))
 
 		rc, err := f.Fetch(context.Background(), "fake-001", "verge-machine-1")
 		if err != nil {
@@ -214,7 +219,7 @@ func TestFetch(t *testing.T) {
 		// also the string that becomes an ssh destination, and a name with a space
 		// in it is a name that arrives as two arguments.
 		marker := filepath.Join(t.TempDir(), "ran")
-		f := fetcher(t, script(t, `touch `+marker))
+		f := client(t, script(t, `touch `+marker))
 
 		for _, name := range []string{"", "two words", "-oProxyCommand=evil", "a/b", "..", "host;rm"} {
 			if rc, err := f.Fetch(context.Background(), "fake-001", name); err == nil {
@@ -228,12 +233,231 @@ func TestFetch(t *testing.T) {
 	})
 
 	t.Run("sad/the_binary_does_not_exist", func(t *testing.T) {
-		f := fetcher(t, filepath.Join(t.TempDir(), "no-such-binary"))
+		f := client(t, filepath.Join(t.TempDir(), "no-such-binary"))
 		if rc, err := f.Fetch(context.Background(), "fake-001", "verge-machine-1"); err == nil {
 			rc.Close()
 			t.Fatal("Fetch with no ssh binary = nil error, want a failure")
 		}
 	})
+}
+
+// TestRun is the session half of the transport: a long-lived command with both
+// directions wired. The save's stricter rule is TestFetch's; here the two facts — the
+// stream ended, the command exited — are deliberately separate, because pi's last record
+// and pi's exit status are separate things.
+func TestRun(t *testing.T) {
+	t.Run("happy/stdin_reaches_the_command_and_stdout_comes_back", func(t *testing.T) {
+		c := client(t, script(t, `cat`))
+
+		p, err := c.Run(context.Background(), "fake-001", "verge-machine-1", "cat")
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		defer p.Close()
+
+		in := "{\"type\":\"prompt\"}\n"
+		if _, err := io.WriteString(p.Stdin(), in); err != nil {
+			t.Fatalf("writing to the command: %v", err)
+		}
+		if err := p.Stdin().Close(); err != nil {
+			t.Fatalf("closing stdin: %v", err)
+		}
+
+		got, err := io.ReadAll(p.Stdout())
+		if err != nil {
+			t.Fatalf("reading the stream: %v", err)
+		}
+		if string(got) != in {
+			t.Fatalf("stream = %q, want %q", got, in)
+		}
+		if err := p.Wait(context.Background()); err != nil {
+			t.Fatalf("Wait on an orderly shutdown: %v", err)
+		}
+	})
+
+	t.Run("happy/the_command_is_the_last_argument", func(t *testing.T) {
+		out := filepath.Join(t.TempDir(), "args")
+		c := client(t, script(t, `printf '%s\n' "$@" > `+out), func(cfg *ssh.Config) {
+			cfg.Args = []string{"-o", "StrictHostKeyChecking=accept-new"}
+		})
+
+		const command = "/usr/local/bin/pi --mode rpc --no-session"
+		p, err := c.Run(context.Background(), "fake-001", "verge-machine-1", command)
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		defer p.Close()
+		if err := p.Stdin().Close(); err != nil {
+			t.Fatalf("closing stdin: %v", err)
+		}
+		if err := p.Wait(context.Background()); err != nil {
+			t.Fatalf("Wait: %v", err)
+		}
+
+		b, err := os.ReadFile(out)
+		if err != nil {
+			t.Fatalf("reading the recorded args: %v", err)
+		}
+		lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+		want := []string{"-o", "StrictHostKeyChecking=accept-new", "verge@verge-machine-1", command}
+		if len(lines) != len(want) {
+			t.Fatalf("ssh was run with %q, want %q", lines, want)
+		}
+		for i := range want {
+			if lines[i] != want[i] {
+				t.Fatalf("ssh was run with %q, want %q", lines, want)
+			}
+		}
+	})
+
+	t.Run("sad/a_failed_exit_is_waits_answer_not_the_streams", func(t *testing.T) {
+		// The session's half of the save's strictness: two records then a crash is a
+		// stream that ended cleanly from the reader's side and a command that failed
+		// from the exit status's. Collapsing the two is how a session would look
+		// settled when its agent died.
+		c := client(t, script(t, `printf 'one\ntwo\n'; echo 'the model is gone' >&2; exit 7`))
+
+		p, err := c.Run(context.Background(), "fake-001", "verge-machine-1", "pi --mode rpc")
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		defer p.Close()
+
+		got, err := io.ReadAll(p.Stdout())
+		if err != nil {
+			t.Fatalf("reading the stream: %v", err)
+		}
+		if string(got) != "one\ntwo\n" {
+			t.Fatalf("stream = %q, want the records that arrived", got)
+		}
+
+		err = p.Wait(context.Background())
+		if err == nil {
+			t.Fatal("Wait after a failed exit = nil, want an error")
+		}
+		if !strings.Contains(err.Error(), "the model is gone") {
+			t.Fatalf("Wait = %v, want the machine's stderr in it", err)
+		}
+	})
+
+	t.Run("sad/a_command_that_has_not_finished_reports_the_deadline", func(t *testing.T) {
+		// A shutdown that waits for pi forever is the shutdown that gets SIGKILLed. The
+		// deadline is the caller's, and the process group dies with it.
+		c := client(t, script(t, `sleep 30`))
+
+		p, err := c.Run(context.Background(), "fake-001", "verge-machine-1", "pi --mode rpc")
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		defer p.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+		defer cancel()
+
+		start := time.Now()
+		err = p.Wait(ctx)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Wait = %v, want the deadline", err)
+		}
+		if elapsed := time.Since(start); elapsed > 2*time.Second {
+			t.Fatalf("Wait took %s, want it bounded by the deadline", elapsed)
+		}
+	})
+
+	t.Run("sad/kill_stops_the_command", func(t *testing.T) {
+		c := client(t, script(t, `sleep 30`))
+
+		p, err := c.Run(context.Background(), "fake-001", "verge-machine-1", "pi --mode rpc")
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		defer p.Close()
+
+		if err := p.Kill(); err != nil {
+			t.Fatalf("Kill: %v", err)
+		}
+		if err := p.Wait(context.Background()); err == nil {
+			t.Fatal("Wait after Kill = nil, want the signal that stopped it")
+		}
+		// Idempotent: a cancellation and a cleanup both arrive here.
+		if err := p.Kill(); err != nil {
+			t.Fatalf("second Kill: %v", err)
+		}
+	})
+
+	t.Run("bad/a_name_that_cannot_be_a_host", func(t *testing.T) {
+		marker := filepath.Join(t.TempDir(), "ran")
+		c := client(t, script(t, `touch `+marker))
+
+		for _, name := range []string{"", "two words", "-oProxyCommand=evil", "a/b", "..", "host;rm"} {
+			if p, err := c.Run(context.Background(), "fake-001", name, "pi --mode rpc"); err == nil {
+				p.Close()
+				t.Fatalf("Run(%q) = nil error, want a refusal", name)
+			}
+		}
+		if _, err := os.Stat(marker); err == nil {
+			t.Fatal("a refused name still started a process")
+		}
+	})
+
+	t.Run("bad/a_command_that_is_not_one_command", func(t *testing.T) {
+		marker := filepath.Join(t.TempDir(), "ran")
+		c := client(t, script(t, `touch `+marker))
+
+		for _, command := range []string{"", "   ", "pi\nrm -rf /", "pi\x00"} {
+			if p, err := c.Run(context.Background(), "fake-001", "verge-machine-1", command); err == nil {
+				p.Close()
+				t.Fatalf("Run(%q) = nil error, want a refusal", command)
+			}
+		}
+		if _, err := os.Stat(marker); err == nil {
+			t.Fatal("a refused command still started a process")
+		}
+	})
+
+	t.Run("sad/the_binary_does_not_exist", func(t *testing.T) {
+		c := client(t, filepath.Join(t.TempDir(), "no-such-binary"))
+		if p, err := c.Run(context.Background(), "fake-001", "verge-machine-1", "pi --mode rpc"); err == nil {
+			p.Close()
+			t.Fatal("Run with no ssh binary = nil error, want a failure")
+		}
+	})
+}
+
+// TestRunKillsTheWholeProcessGroup is the session's version of the save's group case: pi
+// spawns tools, and a turn that is killed while one of them runs must not leave the tool
+// holding the pipe. The stand-in proves the fork happened before anything is killed.
+func TestRunKillsTheWholeProcessGroup(t *testing.T) {
+	c := client(t, script(t, `sleep 30 & echo ready; wait`))
+
+	p, err := c.Run(context.Background(), "fake-001", "verge-machine-1", "pi --mode rpc")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	defer p.Close()
+
+	line, err := bufio.NewReader(p.Stdout()).ReadString('\n')
+	if err != nil {
+		t.Fatalf("reading the ready line: %v", err)
+	}
+	if strings.TrimSpace(line) != "ready" {
+		t.Fatalf("first line = %q, want the stand-in's ready line", line)
+	}
+
+	if err := p.Kill(); err != nil {
+		t.Fatalf("Kill: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- p.Wait(context.Background()) }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Wait after killing a command that had started a child = nil, want the signal")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the wait held on to a child of the command, not the command")
+	}
 }
 
 func TestNew(t *testing.T) {
@@ -280,7 +504,7 @@ func TestFetchCancelsTheWholeProcessGroup(t *testing.T) {
 	// reading that line proves the fork happened. Cancelling before it would pass without
 	// the child ever existing -- which is the case this is named for, and the first version
 	// of the script printed the line first and made the test flaky for exactly that reason.
-	f := fetcher(t, script(t, `sleep 30 & echo ready; wait`))
+	f := client(t, script(t, `sleep 30 & echo ready; wait`))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	rc, err := f.Fetch(ctx, "fake-001", "verge-machine-1")

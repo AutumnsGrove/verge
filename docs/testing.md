@@ -69,9 +69,10 @@ internal/
     syncer.go                 fetch, spool, store: what "saved" means, and the cap
     syncer_test.go            the cap's boundary, an empty fetch, a gone machine,
                               a silent one, and ids that cannot be object keys
-  syncer/ssh/
-    ssh.go                    the transport: one command over ssh, exit status checked
-    ssh_test.go               real processes: the stream, a failing exit, cancellation
+  machine/ssh/
+    ssh.go                    the transport: any command over ssh, stdin and stdout wired
+    ssh_test.go               real processes: a stream, a failing exit, cancellation,
+                              a session's two directions and an orderly shutdown
   net/tailnet/
     client.go                 the real Network: observe, forget (joining is cloud-init)
     client_test.go            against httptest: the two facts, ambiguity, idempotent forget

@@ -23,7 +23,7 @@ real API: the unit tier runs it against `httptest`, and the contract tier that w
 does not exist yet. The tailnet client and the R2 state store exist and are tested against `httptest`,
 and neither has been pointed at real infrastructure. The cloud-init renderer exists and is fuzzed, and the enrolment-key minter it
 feeds exists, but nothing composes the two yet. `internal/syncer` saves a machine's workspace as one
-tarball in R2, and `internal/syncer/ssh` fetches it by running one command on the machine over
+tarball in R2, and `internal/machine/ssh` fetches it by running one command on the machine over
 Tailscale SSH. What is still missing is the machine side of that contract: the image has to provide
 `/usr/local/bin/verge-save`, the sibling of the `verge-join` the renderer already assumes. Until it
 does, a save fails with the command's own error rather than quietly destroying a machine it could not

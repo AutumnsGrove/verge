@@ -1,7 +1,7 @@
 // Command verge-save writes a machine's workspace to stdout as a tar stream.
 //
 // It is the machine half of a save: the control plane runs it over ssh and spools
-// what it writes (internal/syncer/ssh). It is the sibling of verge-join, and both are
+// what it writes (internal/machine/ssh). It is the sibling of verge-join, and both are
 // baked into the image, because nothing fetches code while a machine boots.
 //
 // The rules it keeps, and why each one is load-bearing:
