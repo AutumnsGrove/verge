@@ -1,6 +1,7 @@
 package firefly
 
 import (
+	"context"
 	"strconv"
 	"strings"
 	"testing"
@@ -109,4 +110,44 @@ func TestMintName(t *testing.T) {
 			t.Fatalf("mintName = %q, want %q", name, want)
 		}
 	})
+}
+
+// TestMintNameIsAHint is the property the caller depends on: asking for a name records
+// nothing, and two asks before either provisions agree -- because the answer is only a
+// function of the document. The first version of this minted on the live document and made
+// two asks disagree, which is the drift it now checks for.
+func TestMintNameIsAHint(t *testing.T) {
+	f := newFirefly(t)
+	ctx := context.Background()
+
+	first, err := f.MintName(ctx)
+	if err != nil {
+		t.Fatalf("MintName: %v", err)
+	}
+	if first == "" {
+		t.Fatal("MintName returned an empty name")
+	}
+	if !strings.HasPrefix(first, "verge-machine-") {
+		t.Fatalf("MintName = %q, want the label's prefix", first)
+	}
+
+	f.mu.Lock()
+	counter := f.doc.NextMachineNumber
+	f.mu.Unlock()
+
+	second, err := f.MintName(ctx)
+	if err != nil {
+		t.Fatalf("MintName: %v", err)
+	}
+	if first != second {
+		t.Fatalf("two asks before a provision disagree: %q and %q", first, second)
+	}
+
+	f.mu.Lock()
+	after := f.doc.NextMachineNumber
+	f.mu.Unlock()
+	if after != counter {
+		t.Fatalf("MintName moved the counter from %d to %d: it is a read", counter, after)
+	}
+
 }

@@ -4,6 +4,7 @@
 package ssh_test
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"io"
@@ -268,4 +269,50 @@ func TestNew(t *testing.T) {
 			t.Fatal("New returned nil without an error")
 		}
 	})
+}
+
+// TestFetchCancelsTheWholeProcessGroup is the case CI found on Linux: a command that
+// starts something of its own holds stdout open after the process itself is killed, so the
+// reader waits for output nobody is going to write. The stand-in spawns a child
+// deliberately; the fix is that the whole group dies.
+func TestFetchCancelsTheWholeProcessGroup(t *testing.T) {
+	// The stand-in starts a child that inherits stdout and only then says it is ready, so
+	// reading that line proves the fork happened. Cancelling before it would pass without
+	// the child ever existing -- which is the case this is named for, and the first version
+	// of the script printed the line first and made the test flaky for exactly that reason.
+	f := fetcher(t, script(t, `sleep 30 & echo ready; wait`))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	rc, err := f.Fetch(ctx, "fake-001", "verge-machine-1")
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	defer rc.Close()
+
+	br := bufio.NewReader(rc)
+	line, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatalf("reading the ready line: %v", err)
+	}
+	if strings.TrimSpace(line) != "ready" {
+		t.Fatalf("first line = %q, want the stand-in's ready line", line)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := io.ReadAll(br)
+		done <- err
+	}()
+
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a cancelled fetch read to EOF, want an error")
+		}
+	case <-time.After(2 * time.Second):
+		// Under WaitDelay (5s), which would eventually close the pipe: the point is that
+		// cancelling a save stops what it started promptly.
+		t.Fatal("the read waited for a child of the command, not for the command")
+	}
 }
