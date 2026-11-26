@@ -148,13 +148,13 @@ func (w *world) openWith(ctx context.Context, id string) *session.Session {
 	w.t.Helper()
 	req := session.Request{ID: id}
 
-	_, err := w.m.Open(ctx, req, w.now)
+	_, err := w.m.Open(ctx, req)
 	if !errors.Is(err, session.ErrPending) {
 		w.t.Fatalf("Open before the machine booted = %v, want %v", err, session.ErrPending)
 	}
 	w.ready()
 
-	sess, err := w.m.Open(ctx, req, w.now)
+	sess, err := w.m.Open(ctx, req)
 	if err != nil {
 		w.t.Fatalf("Open after the boot: %v", err)
 	}
@@ -312,7 +312,7 @@ func TestOpen(t *testing.T) {
 		// The caller retries, and a retry during a boot is cheap: it must not buy a
 		// process on a machine that cannot accept connections yet, nor a second machine.
 		w := newWorld(t)
-		_, err := w.m.Open(context.Background(), session.Request{ID: "s-one"}, w.now)
+		_, err := w.m.Open(context.Background(), session.Request{ID: "s-one"})
 		if !errors.Is(err, session.ErrPending) {
 			t.Fatalf("Open = %v, want %v", err, session.ErrPending)
 		}
@@ -332,10 +332,11 @@ func TestOpen(t *testing.T) {
 		w.cloud.FailCreate(errors.New("quota exceeded"))
 		req := session.Request{ID: "s-one"}
 
-		if _, err := w.m.Open(context.Background(), req, w.now); err == nil {
+		if _, err := w.m.Open(context.Background(), req); err == nil {
 			t.Fatal("the first failed create was hidden")
 		}
-		_, err := w.m.Open(context.Background(), req, w.now.Add(time.Second))
+		w.now = w.now.Add(time.Second)
+		_, err := w.m.Open(context.Background(), req)
 		if !errors.Is(err, session.ErrPending) {
 			t.Fatalf("Open during backoff = %v, want %v", err, session.ErrPending)
 		}
@@ -350,13 +351,13 @@ func TestOpen(t *testing.T) {
 		// its job.
 		w := newWorld(t)
 		req := session.Request{ID: "s-one"}
-		if _, err := w.m.Open(context.Background(), req, w.now); !errors.Is(err, session.ErrPending) {
+		if _, err := w.m.Open(context.Background(), req); !errors.Is(err, session.ErrPending) {
 			t.Fatalf("Open before the boot = %v, want %v", err, session.ErrPending)
 		}
 		w.ready()
 
 		w.run.err = errors.New("ssh: the machine never answered")
-		if _, err := w.m.Open(context.Background(), req, w.now); err == nil {
+		if _, err := w.m.Open(context.Background(), req); err == nil {
 			t.Fatal("Open with no transport = nil error, want a failure")
 		}
 		if got := w.live(); got != 0 {
@@ -376,7 +377,7 @@ func TestOpen(t *testing.T) {
 		// failed start took keeps a machine alive for a session nobody can reach.
 		w := newWorld(t)
 		req := session.Request{ID: "s-one"}
-		if _, err := w.m.Open(context.Background(), req, w.now); !errors.Is(err, session.ErrPending) {
+		if _, err := w.m.Open(context.Background(), req); !errors.Is(err, session.ErrPending) {
 			t.Fatalf("Open before the boot = %v, want %v", err, session.ErrPending)
 		}
 		w.ready()
@@ -384,7 +385,7 @@ func TestOpen(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		w.run.cancel = cancel
 		w.run.err = errors.New("ssh: the machine never answered")
-		if _, err := w.m.Open(ctx, req, w.now); err == nil {
+		if _, err := w.m.Open(ctx, req); err == nil {
 			t.Fatal("Open with a cancelled context = nil error, want a failure")
 		}
 		if got := w.live(); got != 0 {
@@ -398,7 +399,7 @@ func TestOpen(t *testing.T) {
 		// matter are the ones that would escape the workspace or be read as flags.
 		w := newWorld(t)
 		for _, id := range []string{"", "two words", "../escape", "-dash", "a/b", "a\nb", strings.Repeat("a", 65)} {
-			if _, err := w.m.Open(context.Background(), session.Request{ID: id}, w.now); !errors.Is(err, session.ErrBadID) {
+			if _, err := w.m.Open(context.Background(), session.Request{ID: id}); !errors.Is(err, session.ErrBadID) {
 				t.Fatalf("Open(%q) = %v, want %v", id, err, session.ErrBadID)
 			}
 		}

@@ -29,7 +29,8 @@ Nothing in the package is new machinery except the joining, which is why it is s
 ## Lifecycle
 
 **Open** returns one of three things, matching placement's answers because this is where they become a
-caller's:
+caller's — and it takes no instant: the manager owns the clock, because placement and the renewal
+window are the same arithmetic on the same lease.
 
 - a `*Session`: pi is running and the lease is held;
 - `ErrPending`: the machine is booting, and the caller asks again — a retry is cheap and does not buy a

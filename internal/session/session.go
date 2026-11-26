@@ -234,7 +234,15 @@ type Request struct {
 // ctx governs the process rather than the call: a caller that hands it a request-scoped
 // context kills pi when the request returns. The context to pass is the one belonging to
 // the stream that will carry the session.
-func (m *Manager) Open(ctx context.Context, req Request, now time.Time) (*Session, error) {
+//
+// There is no `now` argument, deliberately. Placement and the renewal window are the same
+// arithmetic on the same lease, and taking the instant from the caller while renewal read
+// the manager's clock was two clocks to keep in step: a caller a minute ahead of Config.Now
+// acquired a lease that the first renewal would have called lapsed. The manager's clock is
+// the deployment's, and a test moves it.
+func (m *Manager) Open(ctx context.Context, req Request) (*Session, error) {
+	now := m.now()
+
 	if !validID(req.ID) {
 		return nil, fmt.Errorf("%w: %q", ErrBadID, req.ID)
 	}
