@@ -181,7 +181,9 @@ func (c *Client) Run(ctx context.Context, id firefly.MachineID, name, command st
 	// command that spawns helpers would otherwise leave them holding stdout open, and
 	// the reader would wait for output nobody is going to write.
 	configure(cmd)
-	cmd.Cancel = func() error { return terminate(cmd) }
+	p := &Proc{dest: dest, cmd: cmd, stderr: &tail{limit: maxStderr}, signal: terminate}
+	cmd.Cancel = func() error { return p.terminate() }
+	cmd.Stderr = p.stderr
 	// Belt and braces for the same failure: if anything still holds the pipe, Wait stops
 	// waiting for it rather than blocking the caller for as long as the child lives.
 	cmd.WaitDelay = 5 * time.Second
@@ -194,13 +196,13 @@ func (c *Client) Run(ctx context.Context, id firefly.MachineID, name, command st
 	if err != nil {
 		return nil, fmt.Errorf("ssh: piping stdout for %s: %w", id, err)
 	}
-	errBuf := &tail{limit: maxStderr}
-	cmd.Stderr = errBuf
+	p.stdin = in
+	p.stdout = out
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("ssh: starting %s for %s: %w", dest, id, err)
 	}
-	return &Proc{dest: dest, cmd: cmd, stdin: in, stdout: out, stderr: errBuf}, nil
+	return p, nil
 }
 
 // Proc is a command running on a machine.
@@ -221,6 +223,12 @@ type Proc struct {
 
 	once    sync.Once
 	waitErr error
+
+	// signal delivers a kill. It is a field so that a test can prove what a kill after
+	// the wait does -- which is nothing -- because a syscall sent to a process id nobody
+	// holds any more succeeds, and a test that asserted on the return value would pass
+	// whether or not the guard existed.
+	signal func(*exec.Cmd) error
 
 	mu     sync.Mutex
 	closed bool
@@ -315,7 +323,7 @@ func (p *Proc) terminate() error {
 		return nil
 	}
 	p.killed = true
-	return terminate(p.cmd)
+	return p.signal(p.cmd)
 }
 
 // stderrSuffix is the machine's own words about the failure.

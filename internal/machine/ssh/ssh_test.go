@@ -385,11 +385,11 @@ func TestRun(t *testing.T) {
 		}
 	})
 
-	t.Run("sad/kill_after_the_command_exited_signals_nothing", func(t *testing.T) {
-		// Kill on a command the kernel has already reaped must be a no-op. The return
-		// value cannot show the difference -- a kill to a free process id looks like a
-		// success until the id belongs to someone else -- so this pins the path, and the
-		// check that closes the window is the reaped flag in Proc.terminate.
+	t.Run("happy/kill_after_the_command_exited_is_not_an_error", func(t *testing.T) {
+		// Kill after the command has gone is the cleanup path, and it is not a failure to
+		// stop something that already stopped. What the return value cannot show -- that no
+		// signal was sent to a recycled process id -- is TestTerminate's case, which needs
+		// the in-package seam to see it.
 		c := client(t, script(t, `exit 0`))
 
 		p, err := c.Run(context.Background(), "fake-001", "verge-machine-1", "pi --mode rpc")
