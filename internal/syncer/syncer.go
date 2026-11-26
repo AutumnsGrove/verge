@@ -70,6 +70,12 @@ var (
 // It returns the bytes the machine produced, or an error. It must not return an
 // empty stream to mean "the machine is gone" -- that means the machine tarred an
 // empty workspace -- because the two have opposite answers here.
+//
+// **The returned reader must unblock when ctx is done.** Sync can notice a
+// cancellation between reads, and does, but it cannot interrupt a Read that never
+// returns; a transport that honours ctx is the only thing that can. This is part
+// of the contract rather than an assumption because the failure it prevents is a
+// shutdown that waits for a machine that has already stopped answering.
 type Fetcher interface {
 	Fetch(ctx context.Context, id firefly.MachineID) (io.ReadCloser, error)
 }
@@ -180,8 +186,10 @@ func (s *Syncer) Sync(ctx context.Context, id firefly.MachineID) error {
 	defer os.Remove(f.Name())
 
 	// One byte past the cap is enough to refuse it, and reading more would be the
-	// copy this limit exists to prevent.
-	size, err := io.Copy(f, io.LimitReader(rc, s.max+1))
+	// copy this limit exists to prevent. The reader is wrapped so a shutdown is
+	// noticed between reads, which is the one thing this half can do about a stream
+	// that keeps trickling.
+	size, err := io.Copy(f, io.LimitReader(&cancelOnRead{ctx: ctx, r: rc}, s.max+1))
 	if closeErr := f.Close(); err == nil && closeErr != nil {
 		err = closeErr
 	}
@@ -208,6 +216,24 @@ func (s *Syncer) Sync(ctx context.Context, id firefly.MachineID) error {
 		return fmt.Errorf("syncer: storing %s: %w", key, err)
 	}
 	return nil
+}
+
+// cancelOnRead makes a copy notice a cancelled context between reads.
+//
+// It cannot unblock a Read that never returns -- nothing in this process can, and
+// that is why Fetcher's contract puts that obligation on the reader -- but a
+// stream that trickles for longer than the shutdown window is the ordinary
+// failure, and this is where that one is caught.
+type cancelOnRead struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c *cancelOnRead) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(p)
 }
 
 // validElem reports whether s can be one element of an object key.

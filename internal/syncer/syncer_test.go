@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 	"testing/iotest"
+	"time"
 
 	"github.com/AutumnsGrove/verge/internal/firefly"
 	"github.com/AutumnsGrove/verge/internal/syncer"
@@ -21,22 +22,63 @@ import (
 
 // fetcher is the transport boundary: it hands back whatever the machine sent.
 type fetcher struct {
-	body   []byte
-	reader io.ReadCloser // used instead of body when set, to fail mid-stream
-	err    error
-	calls  []firefly.MachineID
+	body    []byte
+	reader  io.ReadCloser // used instead of body when set, to fail mid-stream
+	err     error
+	silent  bool // the stream blocks until the context is done
+	started chan struct{}
+	calls   []firefly.MachineID
 }
 
 func (f *fetcher) Fetch(ctx context.Context, id firefly.MachineID) (io.ReadCloser, error) {
 	f.calls = append(f.calls, id)
+	if f.started != nil {
+		close(f.started)
+	}
 	if f.err != nil {
 		return nil, f.err
+	}
+	if f.silent {
+		return silent{ctx: ctx}, nil
 	}
 	if f.reader != nil {
 		return f.reader, nil
 	}
 	return io.NopCloser(bytes.NewReader(f.body)), nil
 }
+
+// silent is a machine that has stopped answering: Read blocks until the context
+// is done, and then reports why. It is what the Fetcher contract requires of a
+// real transport, and what Sync cannot fix on the transport's behalf.
+type silent struct{ ctx context.Context }
+
+func (s silent) Read([]byte) (int, error) {
+	<-s.ctx.Done()
+	return 0, s.ctx.Err()
+}
+
+func (s silent) Close() error { return nil }
+
+// trickle returns one byte per read, and cancels its own context on the last one:
+// a stream that is still going when the process asks it to stop.
+type trickle struct {
+	left   int
+	cancel context.CancelFunc
+}
+
+func (r *trickle) Read(p []byte) (int, error) {
+	if r.left <= 0 {
+		return 0, io.EOF
+	}
+	r.left--
+	if r.left == 0 {
+		r.cancel()
+	}
+	p[0] = 'x'
+	return 1, nil
+}
+
+func (r *trickle) Close() error { return nil }
 
 // put is one object the sink was asked to store.
 type put struct {
@@ -196,6 +238,69 @@ func TestSync(t *testing.T) {
 		}
 		if len(f.calls) != 0 {
 			t.Fatalf("the fetcher was asked %d times after the context was cancelled, want 0", len(f.calls))
+		}
+	})
+
+	t.Run("sad/context_cancelled_between_reads", func(t *testing.T) {
+		// A stream that trickles while the process is shutting down must be
+		// dropped: the machine is about to be destroyed and the next tick has
+		// already been written.
+		dir := t.TempDir()
+		t.Setenv("TMPDIR", dir)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		f := &fetcher{reader: &trickle{left: 4, cancel: cancel}}
+		s := &sink{}
+		sy := newSyncer(t, f, s)
+
+		err := sy.Sync(ctx, "fake-001")
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Sync = %v, want %v", err, context.Canceled)
+		}
+		if len(s.puts) != 0 {
+			t.Fatalf("stored %d objects for a cancelled save, want 0", len(s.puts))
+		}
+		ents, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatalf("ReadDir: %v", err)
+		}
+		if len(ents) != 0 {
+			t.Fatalf("left %d files behind after a cancelled save: %v", len(ents), ents)
+		}
+	})
+
+	t.Run("sad/machine_is_silent_and_the_context_ends", func(t *testing.T) {
+		// The Fetcher contract says the reader unblocks on cancellation. This pins
+		// both halves of it: the fetcher is handed the context, and a cancellation
+		// reaches the caller as the context's error rather than as a hang or a
+		// stored half-tarball.
+		started := make(chan struct{})
+		f := &fetcher{silent: true, started: started}
+		s := &sink{}
+		sy := newSyncer(t, f, s)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		done := make(chan error, 1)
+		go func() { done <- sy.Sync(ctx, "fake-001") }()
+
+		<-started
+		cancel()
+
+		var err error
+		select {
+		case err = <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Sync did not return after the context ended: the reader ignored the cancellation it is contracted to honour")
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Sync = %v, want %v", err, context.Canceled)
+		}
+		if len(s.puts) != 0 {
+			t.Fatalf("stored %d objects for a silent machine, want 0", len(s.puts))
 		}
 	})
 
