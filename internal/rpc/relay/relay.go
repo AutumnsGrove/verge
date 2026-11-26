@@ -41,6 +41,12 @@ var ErrRecordTooLong = errors.New("relay: record exceeds the limit")
 // two records and leave the far side with a fragment of JSON to reject.
 var ErrRecordHasLF = errors.New("relay: a record cannot contain an LF")
 
+// ErrTruncatedRecord means the stream ended inside a record: the record was cut off
+// rather than framed. It is kept apart from io.EOF on purpose -- a caller that sees a
+// clean end of stream concludes the session ended normally, and a session that ended by
+// dropping half a record did not.
+var ErrTruncatedRecord = errors.New("relay: the stream ended inside a record")
+
 // ErrRecordEndsWithCR means a record being written ends with a CR. Writing it would
 // produce CRLF, and the reader would strip that CR as framing, so the record would come
 // back one byte shorter -- a silent corruption at the one place the encoding is meant to
@@ -110,8 +116,8 @@ func (r *Reader) Next() ([]byte, error) {
 				// The record is refused, and the stream is resynchronised before the error
 				// is returned: a caller that logs and reads on must get the record after
 				// the bad one, not the tail of the bad one.
-				if !r.resync() {
-					r.dead = fmt.Errorf("%w: over %d bytes, and the stream could not be resynchronised", ErrRecordTooLong, r.limit)
+				if deadErr := r.resync(); deadErr != nil {
+					r.dead = deadErr
 				}
 				return nil, fmt.Errorf("%w: over %d bytes", ErrRecordTooLong, r.limit)
 			}
@@ -134,6 +140,12 @@ func (r *Reader) Next() ([]byte, error) {
 			// the far side a piece of JSON to reject, which is the failure this package
 			// exists to prevent -- and it is how a broken pipe or a dropped connection
 			// would end a session.
+			//
+			// It is sticky, and that is not belt and braces: bufio clears its stored error
+			// once it has reported it, so a caller that logs and reads on would get the
+			// rest of the stream as though nothing had happened -- starting with the tail
+			// of the record that was just cut in half.
+			r.dead = err
 			return nil, err
 		}
 	}
@@ -155,21 +167,30 @@ func (r *Reader) finish(rec []byte) ([]byte, error) {
 // resync discards the rest of a record that was refused, up to a second limit.
 //
 // Bounded on purpose: a machine that writes one enormous line is worth recovering from,
-// and a machine that writes nothing but enormous lines is not. It reports whether the
-// stream is back in step -- true when a LF was found, false when the bound was hit first.
-func (r *Reader) resync() bool {
+// and a machine that writes nothing but enormous lines is not. It returns nil when the
+// stream is back in step, and otherwise the reason the reader is dead -- the underlying
+// error when the stream ended or failed, and ErrRecordTooLong when the bound was hit with
+// the line still going.
+func (r *Reader) resync() error {
 	left := r.limit
 	for left > 0 {
 		chunk, err := r.br.ReadSlice('\n')
 		if err == nil {
-			return true // the newline ends the refused record
+			return nil // the newline ends the refused record
 		}
 		if !errors.Is(err, bufio.ErrBufferFull) {
-			return false // EOF or a read error: there is no stream left to be in step with
+			// The stream ended or failed while resynchronising. That is the reason the
+			// reader is dead, and it is reported as itself: collapsing a dropped
+			// connection into an oversized record would leave a caller checking
+			// ErrRecordTooLong to blame the machine's line length for a broken pipe.
+			if errors.Is(err, io.EOF) {
+				return fmt.Errorf("%w: %w", ErrTruncatedRecord, io.EOF)
+			}
+			return err
 		}
 		left -= len(chunk)
 	}
-	return false
+	return fmt.Errorf("%w: over %d bytes, and the stream could not be resynchronised", ErrRecordTooLong, r.limit)
 }
 
 // stripCR removes the carriage return that CRLF framing leaves behind.

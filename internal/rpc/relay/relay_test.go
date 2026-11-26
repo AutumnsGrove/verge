@@ -97,6 +97,28 @@ func TestReader(t *testing.T) {
 		}
 	})
 
+	t.Run("sad/a_read_error_is_sticky", func(t *testing.T) {
+		// bufio clears a stored error once it has reported it, so without a sticky error the
+		// next call reads on and returns the tail of the cut record as a record of its own.
+		// This is the reviewer's reproduction: a failing reader, then more bytes.
+		boom := errors.New("connection reset")
+		r := relay.NewReader(io.MultiReader(
+			strings.NewReader(`{"a":12`),
+			&oneShotErr{err: boom, then: strings.NewReader("34}\n")},
+		))
+
+		if rec, err := r.Next(); !errors.Is(err, boom) {
+			t.Fatalf("first Next = (%q, %v), want the read error", rec, err)
+		}
+		rec, err := r.Next()
+		if err == nil {
+			t.Fatalf("second Next = %q with no error: the tail of the cut record was forwarded", rec)
+		}
+		if rec != nil {
+			t.Fatalf("second Next returned %q alongside the error", rec)
+		}
+	})
+
 	t.Run("sad/a_read_error_mid_record_is_not_a_shorter_record", func(t *testing.T) {
 		// A broken pipe or a dropped connection is how a pi stream normally ends badly,
 		// and forwarding the fragment would hand the far side a piece of JSON to reject --
@@ -165,21 +187,34 @@ func TestReader(t *testing.T) {
 		}
 	})
 
-	t.Run("sad/a_stream_that_cannot_be_resynchronised_is_dead", func(t *testing.T) {
+	t.Run("sad/a_stream_that_keeps_producing_the_line_is_dead", func(t *testing.T) {
 		// A machine that writes one enormous line is worth recovering from; one that is
 		// still mid-line a whole limit later is not, and every later call must say so
 		// rather than hand back pieces of it.
+		const limit = 16
+		r := relay.NewReaderLimit(strings.NewReader(strings.Repeat("x", 10_000)+"\n"), limit)
+
+		if _, err := r.Next(); !errors.Is(err, relay.ErrRecordTooLong) {
+			t.Fatalf("first Next = %v, want %v", err, relay.ErrRecordTooLong)
+		}
+		for i := 0; i < 3; i++ {
+			if _, err := r.Next(); !errors.Is(err, relay.ErrRecordTooLong) {
+				t.Fatalf("later Next = %v, want the same refusal from a dead stream", err)
+			}
+		}
+	})
+
+	t.Run("sad/a_stream_that_ends_inside_the_refused_record", func(t *testing.T) {
+		// Truncation is not a clean end of stream: a caller that saw io.EOF here would
+		// conclude the session ended normally, and it ended by dropping half a record.
 		const limit = 16
 		r := relay.NewReaderLimit(strings.NewReader(strings.Repeat("x", 5000)), limit)
 
 		if _, err := r.Next(); !errors.Is(err, relay.ErrRecordTooLong) {
 			t.Fatalf("first Next = %v, want %v", err, relay.ErrRecordTooLong)
 		}
-		if _, err := r.Next(); !errors.Is(err, relay.ErrRecordTooLong) {
-			t.Fatalf("second Next = %v, want the same refusal from a dead stream", err)
-		}
-		if _, err := r.Next(); !errors.Is(err, relay.ErrRecordTooLong) {
-			t.Fatalf("third Next = %v, want the same refusal", err)
+		if _, err := r.Next(); !errors.Is(err, relay.ErrTruncatedRecord) {
+			t.Fatalf("second Next = %v, want %v", err, relay.ErrTruncatedRecord)
 		}
 	})
 
@@ -314,6 +349,23 @@ func TestWriter(t *testing.T) {
 			t.Fatalf("wrote %d bytes, want %d", got, relay.DefaultLimit)
 		}
 	})
+}
+
+// oneShotErr fails once, then behaves like a reader that still has bytes to give --
+// which is what a bufio.Reader does on a transient failure, and what the sticky-error
+// test has to reproduce.
+type oneShotErr struct {
+	err  error
+	then io.Reader
+	done bool
+}
+
+func (o *oneShotErr) Read(p []byte) (int, error) {
+	if !o.done {
+		o.done = true
+		return 0, o.err
+	}
+	return o.then.Read(p)
 }
 
 // errReader fails after whatever it was paired with has been read.

@@ -19,50 +19,76 @@ import (
 // enough to state twice: split only on LF, strip one CR before each LF, and drop the
 // empty piece that a trailing LF leaves.
 func FuzzRelay(f *testing.F) {
-	for _, seed := range [][]byte{
-		{},
-		[]byte("\n"),
-		[]byte("a\nb\n"),
-		[]byte("a\r\nb\r\n"),
-		[]byte("a\rb\n"),                        // a CR that is content
-		[]byte("{\"t\":\"x\u2028y\u2029z\"}\n"), // the separators Node's readline would split on
-		[]byte("{\"t\":\"é\"}\n"),               // a two-byte rune
-		[]byte("unterminated"),
-		[]byte("\r\n\r\n"),
-		[]byte(strings.Repeat("x", 64) + "\n"),
+	for _, seed := range []struct {
+		data  []byte
+		limit int
+	}{
+		{[]byte(""), 8},
+		{[]byte("\n"), 8},
+		{[]byte("a\nb\n"), 8},
+		{[]byte("a\r\nb\r\n"), 8},
+		{[]byte("a\rb\n"), 8},                         // a CR that is content
+		{[]byte("{\"t\":\"x\u2028y\u2029z\"}\n"), 64}, // the separators Node's readline splits on
+		{[]byte("{\"t\":\"é\"}\n"), 64},               // a two-byte rune
+		{[]byte("unterminated"), 8},
+		{[]byte("\r\n\r\n"), 8},
+		{[]byte(strings.Repeat("x", 64) + "\n"), 16},   // over a small limit
+		{[]byte(strings.Repeat("x", 64) + "\r\n"), 64}, // exactly the limit, with CRLF
 	} {
-		f.Add(seed)
+		f.Add(seed.data, seed.limit)
 	}
 
-	f.Fuzz(func(t *testing.T, data []byte) {
-		want := reference(data)
+	// The limit is a parameter rather than DefaultLimit, because the limit's branches --
+	// the accumulate bound, the resync, and the CRLF-at-the-limit rule -- are where the
+	// interesting failures live, and a target that only ever sees ten megabytes never
+	// reaches any of them.
+	f.Fuzz(func(t *testing.T, data []byte, limit int) {
+		if limit < 1 {
+			limit = 1
+		}
+		if limit > 256 {
+			limit = 256
+		}
 
-		r := relay.NewReaderLimit(bytes.NewReader(data), relay.DefaultLimit)
+		want := reference(data)
+		r := relay.NewReaderLimit(bytes.NewReader(data), limit)
+
 		var got [][]byte
 		for {
 			rec, err := r.Next()
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			if err != nil {
+			switch {
+			case errors.Is(err, io.EOF):
+				if len(want) != 0 {
+					t.Fatalf("%q with limit %d: ended with %d records left over: %q", data, limit, len(want), want)
+				}
+				if len(got) == 0 && len(data) > 0 && len(reference(data)) == 0 {
+					t.Fatalf("%q with limit %d: ended without a record", data, limit)
+				}
+				return
+
+			case errors.Is(err, relay.ErrRecordTooLong), errors.Is(err, relay.ErrTruncatedRecord):
+				// A refusal is only correct for the record that did not fit: the next one
+				// in the reference is the first over the limit.
+				if len(want) == 0 || len(want[0]) <= limit {
+					t.Fatalf("%q with limit %d: refused a record that fits (%q): %v", data, limit, want, err)
+				}
+				return
+
+			case err != nil:
 				t.Fatalf("Next(%q) = %v", data, err)
 			}
+
 			if bytes.IndexByte(rec, '\n') >= 0 {
 				t.Fatalf("Next(%q) returned a record containing an LF: %q", data, rec)
 			}
-			if len(rec) > relay.DefaultLimit {
-				t.Fatalf("Next(%q) returned a %d-byte record", data, len(rec))
+			if len(rec) > limit {
+				t.Fatalf("Next(%q) with limit %d returned a %d-byte record", data, limit, len(rec))
 			}
+			if len(want) == 0 || !bytes.Equal(rec, want[0]) {
+				t.Fatalf("%q record %d = %q, want %q", data, len(got), rec, want)
+			}
+			want = want[1:]
 			got = append(got, rec)
-		}
-
-		if len(got) != len(want) {
-			t.Fatalf("%q gave %d records, want %d: got %q want %q", data, len(got), len(want), got, want)
-		}
-		for i := range want {
-			if !bytes.Equal(got[i], want[i]) {
-				t.Fatalf("%q record %d = %q, want %q", data, i, got[i], want[i])
-			}
 		}
 	})
 }
