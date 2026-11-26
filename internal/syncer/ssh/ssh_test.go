@@ -269,3 +269,40 @@ func TestNew(t *testing.T) {
 		}
 	})
 }
+
+// TestFetchCancelsTheWholeProcessGroup is the case CI found on Linux: a command that
+// starts something of its own holds stdout open after the process itself is killed, so the
+// reader waits for output nobody is going to write. The stand-in spawns a child
+// deliberately; the fix is that the whole group dies.
+func TestFetchCancelsTheWholeProcessGroup(t *testing.T) {
+	// A background child that inherits stdout, which is what `ssh` does not do and what a
+	// shell script comfortably does.
+	child := "sleep 30 & wait"
+	f := fetcher(t, script(t, child))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	rc, err := f.Fetch(ctx, "fake-001", "verge-machine-1")
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	defer rc.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := io.ReadAll(rc)
+		done <- err
+	}()
+
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a cancelled fetch read to EOF, want an error")
+		}
+	case <-time.After(2 * time.Second):
+		// Under WaitDelay (5s), which would eventually close the pipe: the point is that
+		// cancelling a save stops what it started promptly, not that it stops it after a
+		// default timeout.
+		t.Fatal("the read waited for a child of the command, not for the command")
+	}
+}

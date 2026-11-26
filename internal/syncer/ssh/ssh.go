@@ -37,6 +37,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/AutumnsGrove/verge/internal/firefly"
 )
@@ -136,6 +137,14 @@ func (f *Fetcher) Fetch(ctx context.Context, id firefly.MachineID, name string) 
 	args := append(append([]string{}, f.args...), dest, f.command)
 
 	cmd := exec.CommandContext(ctx, f.binary, args...)
+	// The command leads its own process group, and cancellation kills the group: a
+	// command that spawns helpers would otherwise leave them holding stdout open, and the
+	// reader would wait for output nobody is going to write.
+	configure(cmd)
+	cmd.Cancel = func() error { return terminate(cmd) }
+	// Belt and braces for the same failure: if anything still holds the pipe, Wait stops
+	// waiting for it rather than blocking the caller for as long as the child lives.
+	cmd.WaitDelay = 5 * time.Second
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, fmt.Errorf("ssh: piping stdout for %s: %w", id, err)
