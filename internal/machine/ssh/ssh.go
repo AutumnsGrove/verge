@@ -225,6 +225,7 @@ type Proc struct {
 	mu     sync.Mutex
 	closed bool
 	killed bool
+	reaped bool
 }
 
 // Stdin is the command's input. Closing it is how a well-behaved command is told there
@@ -287,7 +288,14 @@ func (p *Proc) Close() error {
 // reap waits for the command once and remembers what it said.
 func (p *Proc) reap() error {
 	p.once.Do(func() {
-		if err := p.cmd.Wait(); err != nil {
+		err := p.cmd.Wait()
+		// Reaped is recorded under the lock terminate reads, so a Kill that arrives
+		// after the wait cannot signal a process id the kernel has already handed to
+		// someone else.
+		p.mu.Lock()
+		p.reaped = true
+		p.mu.Unlock()
+		if err != nil {
 			p.waitErr = fmt.Errorf("ssh: %s: %w%s", p.dest, err, p.stderrSuffix())
 		}
 	})
@@ -297,11 +305,13 @@ func (p *Proc) reap() error {
 // terminate kills the command's process group once, and remembers that it was asked to.
 //
 // Killing a command that has already exited is not a failure: the caller wanted it
-// stopped, and it is.
+// stopped, and it is. Once the command has been reaped there is nothing to signal, and
+// signalling anyway would be a kill sent to whatever process now holds the id -- the
+// reason this checks reaped rather than only killed.
 func (p *Proc) terminate() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.killed {
+	if p.killed || p.reaped {
 		return nil
 	}
 	p.killed = true

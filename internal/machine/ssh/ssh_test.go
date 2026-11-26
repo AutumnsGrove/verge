@@ -385,6 +385,31 @@ func TestRun(t *testing.T) {
 		}
 	})
 
+	t.Run("sad/kill_after_the_command_exited_signals_nothing", func(t *testing.T) {
+		// Kill on a command the kernel has already reaped must be a no-op. The return
+		// value cannot show the difference -- a kill to a free process id looks like a
+		// success until the id belongs to someone else -- so this pins the path, and the
+		// check that closes the window is the reaped flag in Proc.terminate.
+		c := client(t, script(t, `exit 0`))
+
+		p, err := c.Run(context.Background(), "fake-001", "verge-machine-1", "pi --mode rpc")
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		defer p.Close()
+		if err := p.Stdin().Close(); err != nil {
+			t.Fatalf("closing stdin: %v", err)
+		}
+		if err := p.Wait(context.Background()); err != nil {
+			t.Fatalf("Wait: %v", err)
+		}
+		if err := p.Kill(); err != nil {
+			t.Fatalf("Kill after the command exited: %v", err)
+		}
+	})
+
+	// TestRun's bad names come after the sad cases: a refused name must not start a
+	// process, which is also why every case above closes its stdin before waiting.
 	t.Run("bad/a_name_that_cannot_be_a_host", func(t *testing.T) {
 		marker := filepath.Join(t.TempDir(), "ran")
 		c := client(t, script(t, `touch `+marker))
